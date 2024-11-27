@@ -4,14 +4,17 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-#include "./hrt/hrt.h"
+#include "hrt/hrt.h"
 
-#include <stdio.h>
 #include <zephyr/kernel.h>
+#include <zephyr/ipc/ipc_service.h>
+#include <zephyr/drivers/mspi.h>
+
 #include <hal/nrf_vpr_csr.h>
 #include <hal/nrf_vpr_csr_vio.h>
 #include <haly/nrfy_gpio.h>
 
+#include <drivers/mspi/nrfe_mspi.h>
 #include <zephyr/drivers/mspi.h>
 
 #define MAX_DATA_LEN 256
@@ -48,6 +51,86 @@ volatile uint32_t *data_to_send;
 volatile uint8_t data_len;
 volatile uint8_t ce_hold;
 
+static struct ipc_ept ep;
+static atomic_t ipc_atomic_sem = ATOMIC_INIT(0);
+
+void process_packet(const void *data, size_t len);
+
+static void ep_bound(void *priv)
+{
+	atomic_set_bit(&ipc_atomic_sem, NRFE_MSPI_EP_BOUNDED);
+}
+
+static void ep_recv(const void *data, size_t len, void *priv)
+{
+	(void)priv;
+
+	process_packet(data, len);
+}
+
+static struct ipc_ept_cfg ep_cfg = {
+	.cb =
+		{
+			.bound = ep_bound,
+			.received = ep_recv,
+		},
+};
+
+void process_packet(const void *data, size_t len)
+{
+	(void)len;
+	nrfe_mspi_flpr_response_t response;
+	uint8_t *buffer = (uint8_t *)data;
+	uint8_t opcode = *buffer++;
+
+	response.opcode = opcode;
+
+	switch (opcode) {
+	case NRFE_MSPI_CONFIG_PINS: {
+		nrfe_mspi_pinctrl_soc_pin_t *pins_cfg = (nrfe_mspi_pinctrl_soc_pin_t *)buffer;
+
+		for (uint8_t i = 0; i < NRFE_MSPI_PINS_MAX; i++) {
+			uint32_t psel = NRF_GET_PIN(pins_cfg->pin[i]);
+			uint32_t fun = NRF_GET_FUN(pins_cfg->pin[i]);
+			NRF_GPIO_Type *reg = nrf_gpio_pin_port_decode(&psel);
+			/* TODO: Process pinctrl config data */
+		}
+		break;
+	}
+	case NRFE_MSPI_CONFIG_CTRL: {
+		struct mspi_cfg *cfg = (struct mspi_cfg *)buffer;
+		/* TODO: Process controller config data */
+		break;
+	}
+	case NRFE_MSPI_CONFIG_DEV: {
+		struct mspi_dev_cfg *cfg = (struct mspi_dev_cfg *)buffer;
+		/* TODO: Process device config data */
+		break;
+	}
+	case NRFE_MSPI_CONFIG_XFER: {
+		struct mspi_xfer *cfg = (struct mspi_xfer *)buffer;
+		/* TODO: Process xfer config data */
+		break;
+	}
+	case NRFE_MSPI_TX:
+	case NRFE_MSPI_TXRX: {
+		struct mspi_xfer_packet *packet = (struct mspi_xfer_packet *)buffer;
+
+		if (packet->dir == MSPI_RX) {
+			/* TODO: Process received data */
+		} else if (packet->dir == MSPI_TX) {
+			/* TODO: Send data */
+		}
+		break;
+	}
+	default:
+		response.opcode = NRFE_MSPI_WRONG_OPCODE;
+		break;
+	}
+
+	ipc_service_send(&ep, (const void *)&response.opcode, sizeof(response));
+}
+
 void configure_clock(enum mspi_cpp_mode cpp_mode)
 {
 	nrf_vpr_csr_vio_config_t vio_config = {
@@ -55,27 +138,27 @@ void configure_clock(enum mspi_cpp_mode cpp_mode)
 		.stop_cnt = 0,
 	};
 
-	nrf_vpr_csr_vio_dir_set(PIN_DIR_OUT_MASK(SCLK_PIN));
+	nrf_vpr_csr_vio_dir_set(PIN_DIR_OUT_MASK(VIO(NRFE_MSPI_SCK_PIN_NUMBER)));
 
 	switch (cpp_mode) {
 	case MSPI_CPP_MODE_0: {
 		vio_config.clk_polarity = 0;
-		nrf_vpr_csr_vio_out_set(PIN_OUT_LOW_MASK(SCLK_PIN));
+		nrf_vpr_csr_vio_out_set(PIN_OUT_LOW_MASK(VIO(NRFE_MSPI_SCK_PIN_NUMBER)));
 		break;
 	}
 	case MSPI_CPP_MODE_1: {
 		vio_config.clk_polarity = 1;
-		nrf_vpr_csr_vio_out_set(PIN_OUT_LOW_MASK(SCLK_PIN));
+		nrf_vpr_csr_vio_out_set(PIN_OUT_LOW_MASK(VIO(NRFE_MSPI_SCK_PIN_NUMBER)));
 		break;
 	}
 	case MSPI_CPP_MODE_2: {
 		vio_config.clk_polarity = 1;
-		nrf_vpr_csr_vio_out_set(PIN_OUT_HIGH_MASK(SCLK_PIN));
+		nrf_vpr_csr_vio_out_set(PIN_OUT_HIGH_MASK(VIO(NRFE_MSPI_SCK_PIN_NUMBER)));
 		break;
 	}
 	case MSPI_CPP_MODE_3: {
 		vio_config.clk_polarity = 0;
-		nrf_vpr_csr_vio_out_set(PIN_OUT_HIGH_MASK(SCLK_PIN));
+		nrf_vpr_csr_vio_out_set(PIN_OUT_HIGH_MASK(VIO(NRFE_MSPI_SCK_PIN_NUMBER)));
 		break;
 	}
 	}
@@ -143,8 +226,47 @@ __attribute__((interrupt)) void hrt_handler_write_quad(void)
 			   ce_hold);
 }
 
+static int backend_init(void)
+{
+	int ret = 0;
+	const struct device *ipc0_instance;
+	volatile uint32_t delay = 0;
+
+#if !defined(CONFIG_SYS_CLOCK_EXISTS)
+	/* Wait a little bit for IPC service to be ready on APP side */
+	while (delay < 1000) {
+		delay++;
+	}
+#endif
+
+	ipc0_instance = DEVICE_DT_GET(DT_NODELABEL(ipc0));
+
+	ret = ipc_service_open_instance(ipc0_instance);
+	if ((ret < 0) && (ret != -EALREADY)) {
+		return ret;
+	}
+
+	ret = ipc_service_register_endpoint(ipc0_instance, &ep, &ep_cfg);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Wait for endpoint to be bound */
+	while (!atomic_test_and_clear_bit(&ipc_atomic_sem, NRFE_MSPI_EP_BOUNDED)) {
+	}
+
+	return 0;
+}
+
 int main(void)
 {
+	int ret = 0;
+
+	ret = backend_init();
+	if (ret < 0) {
+		return 0;
+	}
+
 	IRQ_DIRECT_CONNECT(HRT_VEVIF_IDX_WRITE_SINGLE, HRT_IRQ_PRIORITY, hrt_handler_write_single,
 			   0);
 	nrf_vpr_clic_int_enable_set(NRF_VPRCLIC, VEVIF_IRQN(HRT_VEVIF_IDX_WRITE_SINGLE), true);
@@ -153,25 +275,6 @@ int main(void)
 	nrf_vpr_clic_int_enable_set(NRF_VPRCLIC, VEVIF_IRQN(HRT_VEVIF_IDX_WRITE_QUAD), true);
 
 	nrf_vpr_csr_rtperiph_enable_set(true);
-
-	nrf_gpio_pin_dir_t dir = NRF_GPIO_PIN_DIR_OUTPUT;
-	nrf_gpio_pin_input_t input = NRF_GPIO_PIN_INPUT_DISCONNECT;
-	nrf_gpio_pin_pull_t pull = NRF_GPIO_PIN_NOPULL;
-	nrf_gpio_pin_drive_t drive = NRF_GPIO_PIN_E0E1;
-
-	nrfy_gpio_reconfigure(NRF_GPIO_PIN_MAP(2, SCLK_PIN), &dir, &input, &pull, &drive, NULL);
-	nrfy_gpio_reconfigure(NRF_GPIO_PIN_MAP(2, D0_PIN), &dir, &input, &pull, &drive, NULL);
-	nrfy_gpio_reconfigure(NRF_GPIO_PIN_MAP(2, D1_PIN), &dir, &input, &pull, &drive, NULL);
-	nrfy_gpio_reconfigure(NRF_GPIO_PIN_MAP(2, D2_PIN), &dir, &input, &pull, &drive, NULL);
-	nrfy_gpio_reconfigure(NRF_GPIO_PIN_MAP(2, D3_PIN), &dir, &input, &pull, &drive, NULL);
-	nrfy_gpio_reconfigure(NRF_GPIO_PIN_MAP(2, CS_PIN), &dir, &input, &pull, &drive, NULL);
-
-	nrfy_gpio_pin_control_select(NRF_GPIO_PIN_MAP(2, SCLK_PIN), NRF_GPIO_PIN_SEL_VPR);
-	nrfy_gpio_pin_control_select(NRF_GPIO_PIN_MAP(2, D0_PIN), NRF_GPIO_PIN_SEL_VPR);
-	nrfy_gpio_pin_control_select(NRF_GPIO_PIN_MAP(2, D1_PIN), NRF_GPIO_PIN_SEL_VPR);
-	nrfy_gpio_pin_control_select(NRF_GPIO_PIN_MAP(2, D2_PIN), NRF_GPIO_PIN_SEL_VPR);
-	nrfy_gpio_pin_control_select(NRF_GPIO_PIN_MAP(2, D3_PIN), NRF_GPIO_PIN_SEL_VPR);
-	nrfy_gpio_pin_control_select(NRF_GPIO_PIN_MAP(2, CS_PIN), NRF_GPIO_PIN_SEL_VPR);
 
 	mspi_dev_configs.ce_polarity = MSPI_CE_ACTIVE_LOW;
 	mspi_dev_configs.io_mode = MSPI_IO_MODE_SINGLE;
