@@ -15,7 +15,7 @@
 #include <zephyr/sys/atomic.h>
 #endif
 #include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(mspi_nrfe, CONFIG_MSPI_LOG_LEVEL);
+LOG_MODULE_REGISTER(mspi_nrfe, LOG_LEVEL_DBG);
 
 #include <hal/nrf_gpio.h>
 #include <drivers/mspi/nrfe_mspi.h>
@@ -23,7 +23,7 @@ LOG_MODULE_REGISTER(mspi_nrfe, CONFIG_MSPI_LOG_LEVEL);
 #define MSPI_NRFE_NODE	   DT_DRV_INST(0)
 #define MAX_TX_MSG_SIZE	   (DT_REG_SIZE(DT_NODELABEL(sram_tx)))
 #define MAX_RX_MSG_SIZE	   (DT_REG_SIZE(DT_NODELABEL(sram_rx)))
-#define CONFIG_TIMEOUT_MS  100
+#define CONFIG_TIMEOUT_MS  1000
 #define EP_SEND_TIMEOUT_MS 10
 
 #define SDP_MPSI_PINCTRL_DEV_CONFIG_INIT(node_id)                                                  \
