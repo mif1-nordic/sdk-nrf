@@ -75,6 +75,9 @@ static struct ipc_ept_cfg ep_cfg = {
 			.received = ep_recv,
 		},
 };
+static uint8_t custom_data[30] = {0xa3, 0x21, 0x54, 0x3a, 0x55, 0xa5, 0x45, 0x35, 0x34, 0x23,
+			    0xa3, 0xad, 0x97, 0xb2, 0x56, 0x54, 0x38, 0x88, 0x0,  0x5,
+			    0x33, 0x6,	0x34, 0x6,  0x57, 0x7,	0xbb, 0xba, 0xa3, 0xf6};
 
 void process_packet(const void *data, size_t len)
 {
@@ -94,22 +97,32 @@ void process_packet(const void *data, size_t len)
 			uint32_t fun = NRF_GET_FUN(pins_cfg->pin[i]);
 			NRF_GPIO_Type *reg = nrf_gpio_pin_port_decode(&psel);
 			/* TODO: Process pinctrl config data */
+
+			
 		}
+		custom_data[0] = NRFE_MSPI_CONFIG_PINS;
+		prepare_and_send_data(custom_data, 1);
 		break;
 	}
 	case NRFE_MSPI_CONFIG_CTRL: {
 		struct mspi_cfg *cfg = (struct mspi_cfg *)buffer;
 		/* TODO: Process controller config data */
+		custom_data[0] = NRFE_MSPI_CONFIG_CTRL;
+		prepare_and_send_data(custom_data, 1);
 		break;
 	}
 	case NRFE_MSPI_CONFIG_DEV: {
 		struct mspi_dev_cfg *cfg = (struct mspi_dev_cfg *)buffer;
 		/* TODO: Process device config data */
+		custom_data[0] = NRFE_MSPI_CONFIG_DEV;
+		prepare_and_send_data(custom_data, 1);
 		break;
 	}
 	case NRFE_MSPI_CONFIG_XFER: {
 		struct mspi_xfer *cfg = (struct mspi_xfer *)buffer;
 		/* TODO: Process xfer config data */
+		custom_data[0] = NRFE_MSPI_CONFIG_XFER;
+		prepare_and_send_data(custom_data, 1);
 		break;
 	}
 	case NRFE_MSPI_TX:
@@ -120,7 +133,10 @@ void process_packet(const void *data, size_t len)
 			/* TODO: Process received data */
 		} else if (packet->dir == MSPI_TX) {
 			/* TODO: Send data */
+			prepare_and_send_data(packet->data_buf, packet->num_bytes);
 		}
+		custom_data[0] = NRFE_MSPI_TXRX;
+		prepare_and_send_data(custom_data, 1);
 		break;
 	}
 	default:
@@ -281,7 +297,7 @@ int main(void)
 	mspi_dev_configs.cmd_length = 32;
 	mspi_dev_configs.addr_length = 32;
 
-	uint8_t data[30] = {0xa3, 0x21, 0x54, 0x3a, 0x55, 0xa5, 0x45, 0x35, 0x34, 0x23,
+	/*uint8_t data[30] = {0xa3, 0x21, 0x54, 0x3a, 0x55, 0xa5, 0x45, 0x35, 0x34, 0x23,
 			    0xa3, 0xad, 0x97, 0xb2, 0x56, 0x54, 0x38, 0x88, 0x0,  0x5,
 			    0x33, 0x6,	0x34, 0x6,  0x57, 0x7,	0xbb, 0xba, 0xa3, 0xf6};
 	prepare_and_send_data(data, 30);
@@ -289,7 +305,7 @@ int main(void)
 	mspi_dev_configs.io_mode = MSPI_IO_MODE_QUAD;
 
 	prepare_and_send_data(data, 30);
-
+*/
 	while (true) {
 		k_cpu_idle();
 	}
