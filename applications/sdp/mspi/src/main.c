@@ -21,6 +21,8 @@
 
 #define MAX_FREQUENCY 64000000
 
+#define MAX_SHIFT_COUNT 63
+
 #define CE_PIN_UNUSED UINT8_MAX
 
 #define HRT_IRQ_PRIORITY    2
@@ -28,9 +30,6 @@
 
 #define VEVIF_IRQN(vevif)   VEVIF_IRQN_1(vevif)
 #define VEVIF_IRQN_1(vevif) VPRCLIC_##vevif##_IRQn
-
-/* In OCTAL mode 4 bytes for address + 32 bytes for up to 32 dummy cycles*/
-#define ADDR_AND_CYCLES_MAX_SIZE 36
 
 static const uint8_t pin_to_vio_map[NRFE_MSPI_VIO_COUNT] = {
 	4,  /* Physical pin 0 */
@@ -47,13 +46,13 @@ static const uint8_t pin_to_vio_map[NRFE_MSPI_VIO_COUNT] = {
 };
 
 static const hrt_xfer_bus_widths_t io_modes[SUPPORTED_IO_MODES_COUNT] = {
-	{1, 1, 1}, /* MSPI_IO_MODE_SINGLE */
-	{2, 2, 2}, /* MSPI_IO_MODE_DUAL */
-	{1, 1, 2}, /* MSPI_IO_MODE_DUAL_1_1_2 */
-	{1, 2, 2}, /* MSPI_IO_MODE_DUAL_1_2_2 */
-	{4, 4, 4}, /* MSPI_IO_MODE_QUAD */
-	{1, 1, 4}, /* MSPI_IO_MODE_QUAD_1_1_4 */
-	{1, 4, 4}, /* MSPI_IO_MODE_QUAD_1_4_4 */
+	{1, 1, 1, 1}, /* MSPI_IO_MODE_SINGLE */
+	{2, 2, 2, 2}, /* MSPI_IO_MODE_DUAL */
+	{1, 1, 1, 2}, /* MSPI_IO_MODE_DUAL_1_1_2 */
+	{1, 2, 2, 2}, /* MSPI_IO_MODE_DUAL_1_2_2 */
+	{4, 4, 4, 4}, /* MSPI_IO_MODE_QUAD */
+	{1, 1, 1, 4}, /* MSPI_IO_MODE_QUAD_1_1_4 */
+	{1, 4, 4, 4}, /* MSPI_IO_MODE_QUAD_1_4_4 */
 };
 
 static volatile uint8_t ce_vios_count;
@@ -64,7 +63,6 @@ static volatile nrfe_mspi_xfer_config_t nrfe_mspi_xfer_config;
 static volatile nrfe_mspi_dev_config_t nrfe_mspi_devices[NRFE_MSPI_DEVICES_MAX];
 
 static volatile hrt_xfer_t xfer_params;
-static volatile uint8_t address_and_dummy_cycles[ADDR_AND_CYCLES_MAX_SIZE];
 
 static struct ipc_ept ep;
 static atomic_t ipc_atomic_sem = ATOMIC_INIT(0);
@@ -97,7 +95,11 @@ static void adjust_tail(volatile hrt_xfer_data_t *xfer_data, uint16_t frame_widt
 	uint8_t penultimate_word_length = BITS_IN_WORD;
 
 	xfer_data->word_count = NRFX_CEIL_DIV(data_length, BITS_IN_WORD);
-	xfer_data->last_word = ((uint32_t *)xfer_data->data)[xfer_data->word_count - 1];
+	if (xfer_data->data == NULL) {
+		xfer_data->last_word = 0;
+	} else {
+		xfer_data->last_word = ((uint32_t *)xfer_data->data)[xfer_data->word_count - 1];
+	}
 
 	/* Due to hardware limitations it is not possible to send only 1
 	 * clock cycle. Therefore when data_length%32==FRAME_WIDTH  last
@@ -107,17 +109,23 @@ static void adjust_tail(volatile hrt_xfer_data_t *xfer_data, uint16_t frame_widt
 	if (last_word_length == 0) {
 
 		last_word_length = BITS_IN_WORD;
-		xfer_data->last_word = ((uint32_t *)xfer_data->data)[xfer_data->word_count - 1];
+		if (xfer_data->data != NULL) {
+			xfer_data->last_word =
+				((uint32_t *)xfer_data->data)[xfer_data->word_count - 1];
+		}
 
 	} else if ((last_word_length / frame_width == 1) && (xfer_data->word_count > 1)) {
 
 		penultimate_word_length -= BITS_IN_BYTE;
 		last_word_length += BITS_IN_BYTE;
 
-		xfer_data->last_word = ((uint32_t *)xfer_data->data)[xfer_data->word_count - 2] >>
-					       (BITS_IN_WORD - BITS_IN_BYTE) |
-				       ((uint32_t *)xfer_data->data)[xfer_data->word_count - 1]
-					       << BITS_IN_BYTE;
+		if (xfer_data->data != NULL) {
+			xfer_data->last_word =
+				((uint32_t *)xfer_data->data)[xfer_data->word_count - 2] >>
+					(BITS_IN_WORD - BITS_IN_BYTE) |
+				((uint32_t *)xfer_data->data)[xfer_data->word_count - 1]
+					<< BITS_IN_BYTE;
+		}
 	}
 
 	xfer_data->last_word_clocks = last_word_length / frame_width;
@@ -179,6 +187,9 @@ static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 	xfer_packet->command =
 		xfer_packet->command
 		<< (BITS_IN_WORD - nrfe_mspi_xfer_config.command_length * BITS_IN_BYTE);
+	xfer_packet->address =
+		xfer_packet->address
+		<< (BITS_IN_WORD - nrfe_mspi_xfer_config.address_length * BITS_IN_BYTE);
 
 	xfer_params.xfer_data[HRT_FE_COMMAND].vio_out_set =
 		&nrf_vpr_csr_vio_out_buffered_reversed_word_set;
@@ -188,24 +199,44 @@ static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 	adjust_tail(&xfer_params.xfer_data[HRT_FE_COMMAND], xfer_params.bus_widths.command,
 		    nrfe_mspi_xfer_config.command_length * BITS_IN_BYTE);
 
-	/* Reverse address byte order so that address values are sent instead of zeros */
-	for (uint8_t i = 0; i < nrfe_mspi_xfer_config.address_length; i++) {
-		address_and_dummy_cycles[i] =
-			*(((uint8_t *)&xfer_packet->address) + nrfe_mspi_xfer_config.address_length - i - 1);
-	}
-
-	for (uint8_t i = nrfe_mspi_xfer_config.address_length; i < ADDR_AND_CYCLES_MAX_SIZE; i++) {
-		address_and_dummy_cycles[i] = 0;
-	}
-
 	xfer_params.xfer_data[HRT_FE_ADDRESS].vio_out_set =
-		&nrf_vpr_csr_vio_out_buffered_reversed_byte_set;
-	xfer_params.xfer_data[HRT_FE_ADDRESS].data = address_and_dummy_cycles;
+		&nrf_vpr_csr_vio_out_buffered_reversed_word_set;
+	xfer_params.xfer_data[HRT_FE_ADDRESS].data = (uint8_t *)&xfer_packet->address;
 	xfer_params.xfer_data[HRT_FE_ADDRESS].word_count = 0;
 
 	adjust_tail(&xfer_params.xfer_data[HRT_FE_ADDRESS], xfer_params.bus_widths.address,
-		    nrfe_mspi_xfer_config.address_length * BITS_IN_BYTE +
-			    nrfe_mspi_xfer_config.tx_dummy * xfer_params.bus_widths.address);
+		    nrfe_mspi_xfer_config.address_length * BITS_IN_BYTE);
+
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].vio_out_set =
+		&nrf_vpr_csr_vio_out_buffered_reversed_word_set;
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].data = NULL;
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].word_count = 0;
+
+	if (nrfe_mspi_xfer_config.address_length != 0) {
+		if (xfer_params.xfer_data[HRT_FE_ADDRESS].last_word_clocks +
+			    nrfe_mspi_xfer_config.tx_dummy <=
+		    MAX_SHIFT_COUNT) {
+			xfer_params.xfer_data[HRT_FE_ADDRESS].last_word_clocks +=
+				nrfe_mspi_xfer_config.tx_dummy;
+		} else {
+			adjust_tail(&xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES],
+				    xfer_params.bus_widths.dummy_cycles,
+				    nrfe_mspi_xfer_config.tx_dummy *
+					    xfer_params.bus_widths.dummy_cycles);
+		}
+	} else {
+		if (xfer_params.xfer_data[HRT_FE_COMMAND].last_word_clocks +
+			    nrfe_mspi_xfer_config.tx_dummy <=
+		    MAX_SHIFT_COUNT) {
+			xfer_params.xfer_data[HRT_FE_COMMAND].last_word_clocks +=
+				nrfe_mspi_xfer_config.tx_dummy;
+		} else {
+			adjust_tail(&xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES],
+				    xfer_params.bus_widths.dummy_cycles,
+				    nrfe_mspi_xfer_config.tx_dummy *
+					    xfer_params.bus_widths.dummy_cycles);
+		}
+	}
 
 	xfer_params.xfer_data[HRT_FE_DATA].vio_out_set =
 		&nrf_vpr_csr_vio_out_buffered_reversed_byte_set;
