@@ -65,14 +65,6 @@ static atomic_t ipc_atomic_sem = ATOMIC_INIT(0);
 		.sw_multi_periph = false,                                                          \
 	}
 
-struct mspi_nrfe_data {
-	struct mspi_xfer xfer;
-	struct mspi_dev_id dev_id;
-	struct mspi_dev_cfg dev_cfg;
-};
-
-static struct mspi_nrfe_data dev_data;
-
 struct mspi_nrfe_config {
 	struct mspi_cfg mspicfg;
 	const struct pinctrl_dev_config *pcfg;
@@ -104,10 +96,7 @@ static void ep_recv(const void *data, size_t len, void *priv)
 }
 
 static struct ipc_ept_cfg ep_cfg = {
-	.cb = {
-		.bound = ep_bound,
-		.received = ep_recv,
-	},
+	.cb = {.bound = ep_bound, .received = ep_recv},
 };
 
 /**
@@ -130,14 +119,6 @@ static void ipc_recv_clbk(const void *data, size_t len)
 		k_sem_give(&ipc_sem_cfg);
 #else
 		atomic_set_bit(&ipc_atomic_sem, NRFE_MSPI_CONFIG_PINS);
-#endif
-		break;
-	}
-	case NRFE_MSPI_CONFIG_CTRL: {
-#if defined(CONFIG_MULTITHREADING)
-		k_sem_give(&ipc_sem_cfg);
-#else
-		atomic_set_bit(&ipc_atomic_sem, NRFE_MSPI_CONFIG_CTRL);
 #endif
 		break;
 	}
@@ -167,7 +148,7 @@ static void ipc_recv_clbk(const void *data, size_t len)
 	}
 	case NRFE_MSPI_TXRX: {
 		if (len > 0) {
-			ipc_received = len - 1;
+			ipc_received = len - sizeof(nrfe_mspi_opcode_t);
 			ipc_receive_buffer = (uint8_t *)&response->data;
 		}
 #if defined(CONFIG_MULTITHREADING)
@@ -196,7 +177,7 @@ static void ipc_recv_clbk(const void *data, size_t len)
  * @return 0 on success, -ENOMEM if there is no space in the buffer,
  *         -ETIMEDOUT if the transfer timed out.
  */
-static int mspi_ipc_data_send(enum nrfe_mspi_opcode opcode, const void *data, size_t len)
+static int mspi_ipc_data_send(nrfe_mspi_opcode_t opcode, const void *data, size_t len)
 {
 	int rc;
 
@@ -233,14 +214,13 @@ static int mspi_ipc_data_send(enum nrfe_mspi_opcode opcode, const void *data, si
  *
  * @return 0 on success, -ETIMEDOUT if the operation timed out.
  */
-static int nrfe_mspi_wait_for_response(enum nrfe_mspi_opcode opcode, uint32_t timeout)
+static int nrfe_mspi_wait_for_response(nrfe_mspi_opcode_t opcode, uint32_t timeout)
 {
 #if defined(CONFIG_MULTITHREADING)
 	int ret = 0;
 
 	switch (opcode) {
 	case NRFE_MSPI_CONFIG_PINS:
-	case NRFE_MSPI_CONFIG_CTRL:
 	case NRFE_MSPI_CONFIG_DEV:
 	case NRFE_MSPI_CONFIG_XFER: {
 		ret = k_sem_take(&ipc_sem_cfg, K_MSEC(timeout));
@@ -281,28 +261,6 @@ static int nrfe_mspi_wait_for_response(enum nrfe_mspi_opcode opcode, uint32_t ti
 }
 
 /**
- * @brief Send a data struct to the FLPR core using the IPC service.
- *
- * The function sends a data structure to the FLPR core,
- * inserting a byte at the beginning responsible for the opcode.
- *
- * @param opcode The NRFE MSPI opcode.
- * @param data The data to send.
- * @param len The length of the data to send.
- *
- * @return 0 on success, negative errno code on failure.
- */
-static int send_with_opcode(enum nrfe_mspi_opcode opcode, const void *data, size_t len)
-{
-	uint8_t buffer[len + 1];
-
-	buffer[0] = (uint8_t)opcode;
-	memcpy(&buffer[1], data, len);
-
-	return mspi_ipc_data_send(opcode, buffer, sizeof(buffer));
-}
-
-/**
  * @brief Send a configuration struct to the FLPR core using the IPC service.
  *
  * @param opcode The configuration packet opcode to send.
@@ -311,11 +269,11 @@ static int send_with_opcode(enum nrfe_mspi_opcode opcode, const void *data, size
  *
  * @return 0 on success, negative errno code on failure.
  */
-static int send_config(enum nrfe_mspi_opcode opcode, const void *config, size_t len)
+static int send_config(nrfe_mspi_opcode_t opcode, const void *config, size_t len)
 {
 	int rc;
+	rc = mspi_ipc_data_send(opcode, config, len);
 
-	rc = send_with_opcode(opcode, config, len);
 	if (rc < 0) {
 		LOG_ERR("Configuration send failed: %d", rc);
 		return rc;
@@ -342,28 +300,26 @@ static int send_config(enum nrfe_mspi_opcode opcode, const void *config, size_t 
  */
 static int api_config(const struct mspi_dt_spec *spec)
 {
-	int ret;
-	const struct mspi_cfg *config = &spec->config;
 	const struct mspi_nrfe_config *drv_cfg = spec->bus->config;
+	nrfe_mspi_pinctrl_soc_pin_msg_t mspi_pin_config;
 
-	if (config->op_mode != MSPI_OP_MODE_CONTROLLER) {
-		LOG_ERR("Only MSPI controller mode is supported.");
+	if (spec->config.op_mode != MSPI_OP_MODE_CONTROLLER) {
+		LOG_ERR("%u, only support MSPI controller mode.", __LINE__);
 		return -ENOTSUP;
 	}
 
-	if (config->dqs_support) {
-		LOG_ERR("DQS mode is not supported.");
+	if (spec->config.dqs_support) {
+		LOG_ERR("%u, only support non-DQS mode.", __LINE__);
 		return -ENOTSUP;
 	}
 
-	if (config->max_freq > drv_cfg->mspicfg.max_freq) {
-		LOG_ERR("max_freq is too large.");
+	if (spec->config.max_freq > drv_cfg->mspicfg.max_freq) {
+		LOG_ERR("%u, max_freq too large.", __LINE__);
 		return -ENOTSUP;
 	}
 
 	/* Create pinout configuration */
 	uint8_t state_id;
-	nrfe_mspi_pinctrl_soc_pin_t pins_cfg;
 
 	for (state_id = 0; state_id < drv_cfg->pcfg->state_cnt; state_id++) {
 		if (drv_cfg->pcfg->states[state_id].id == PINCTRL_STATE_DEFAULT) {
@@ -382,17 +338,13 @@ static int api_config(const struct mspi_dt_spec *spec)
 	}
 
 	for (uint8_t i = 0; i < drv_cfg->pcfg->states[state_id].pin_cnt; i++) {
-		pins_cfg.pin[i] = drv_cfg->pcfg->states[state_id].pins[i];
+		mspi_pin_config.pin[i] = drv_cfg->pcfg->states[state_id].pins[i];
 	}
+	mspi_pin_config.opcode = NRFE_MSPI_CONFIG_PINS;
 
 	/* Send pinout configuration to FLPR */
-	ret = send_config(NRFE_MSPI_CONFIG_PINS, (const void *)pins_cfg.pin, sizeof(pins_cfg));
-	if (ret < 0) {
-		return ret;
-	}
-
-	/* Send controller configuration to FLPR */
-	return send_config(NRFE_MSPI_CONFIG_CTRL, (const void *)config, sizeof(struct mspi_cfg));
+	return send_config(NRFE_MSPI_CONFIG_PINS, (const void *)&mspi_pin_config,
+			   sizeof(nrfe_mspi_pinctrl_soc_pin_msg_t));
 }
 
 static int check_io_mode(enum mspi_io_mode io_mode)
@@ -425,8 +377,8 @@ static int api_dev_config(const struct device *dev, const struct mspi_dev_id *de
 			  const enum mspi_dev_cfg_mask param_mask, const struct mspi_dev_cfg *cfg)
 {
 	const struct mspi_nrfe_config *drv_cfg = dev->config;
-	struct mspi_nrfe_data *drv_data = dev->data;
 	int rc;
+	nrfe_mspi_dev_config_msg_t mspi_dev_config_msg;
 
 	if (param_mask & MSPI_DEVICE_CONFIG_MEM_BOUND) {
 		if (cfg->mem_boundary) {
@@ -471,10 +423,22 @@ static int api_dev_config(const struct device *dev, const struct mspi_dev_id *de
 		}
 	}
 
-	memcpy((void *)&drv_data->dev_cfg, (void *)cfg, sizeof(drv_data->dev_cfg));
-	drv_data->dev_id = *dev_id;
+	mspi_dev_config_msg.opcode = NRFE_MSPI_CONFIG_DEV;
+	mspi_dev_config_msg.device_index = dev_id->dev_idx;
+	mspi_dev_config_msg.dev_config.io_mode = cfg->io_mode;
+	mspi_dev_config_msg.dev_config.cpp = cfg->cpp;
+	mspi_dev_config_msg.dev_config.ce_polarity = cfg->ce_polarity;
+	mspi_dev_config_msg.dev_config.freq = cfg->freq;
+	mspi_dev_config_msg.dev_config.ce_index = cfg->ce_num;
 
-	return send_config(NRFE_MSPI_CONFIG_DEV, (void *)cfg, sizeof(struct mspi_dev_cfg));
+	rc = send_config(NRFE_MSPI_CONFIG_DEV, (void *)&mspi_dev_config_msg,
+			 sizeof(nrfe_mspi_dev_config_msg_t));
+	if (rc < 0) {
+		LOG_ERR("Send xfer config error: %d", rc);
+		return rc;
+	}
+
+	return 0;
 }
 
 static int api_get_channel_status(const struct device *dev, uint8_t ch)
@@ -497,21 +461,23 @@ static int api_get_channel_status(const struct device *dev, uint8_t ch)
 static int xfer_packet(struct mspi_xfer_packet *packet, uint32_t timeout)
 {
 	int rc;
-	uint32_t struct_size = sizeof(struct mspi_xfer_packet);
-	uint32_t len = struct_size + packet->num_bytes + 1;
+	uint32_t len = sizeof(nrfe_mspi_xfer_packet_msg_t) + packet->num_bytes;
 	uint8_t buffer[len];
-	enum nrfe_mspi_opcode opcode = (packet->dir == MSPI_RX) ? NRFE_MSPI_TXRX : NRFE_MSPI_TX;
+	nrfe_mspi_xfer_packet_msg_t *xfer_packet = (nrfe_mspi_xfer_packet_msg_t *)buffer;
 
-	buffer[0] = (uint8_t)opcode;
-	memcpy((void *)&buffer[1], (void *)packet, struct_size);
-	memcpy((void *)(&buffer[1] + struct_size), (void *)packet->data_buf, packet->num_bytes);
+	xfer_packet->opcode = (packet->dir == MSPI_RX) ? NRFE_MSPI_TXRX : NRFE_MSPI_TX;
+	xfer_packet->command = packet->cmd;
+	xfer_packet->address = packet->address;
+	xfer_packet->num_bytes = packet->num_bytes;
 
-	rc = mspi_ipc_data_send(opcode, buffer, len);
+	memcpy((void *)xfer_packet->data, (void *)packet->data_buf, packet->num_bytes);
+
+	rc = mspi_ipc_data_send(xfer_packet->opcode, buffer, len);
 	if (rc < 0) {
 		LOG_ERR("Packet transfer error: %d", rc);
 	}
 
-	rc = nrfe_mspi_wait_for_response(opcode, timeout);
+	rc = nrfe_mspi_wait_for_response(xfer_packet->opcode, timeout);
 	if (rc < 0) {
 		LOG_ERR("FLPR Xfer response timeout: %d", rc);
 		return rc;
@@ -573,10 +539,10 @@ static int start_next_packet(struct mspi_xfer *xfer, uint32_t packets_done)
 static int api_transceive(const struct device *dev, const struct mspi_dev_id *dev_id,
 			  const struct mspi_xfer *req)
 {
-	(void)dev_id;
-	struct mspi_nrfe_data *drv_data = dev->data;
+	(void)dev;
 	uint32_t packets_done = 0;
 	int rc;
+	nrfe_mspi_xfer_config_msg_t mspi_xfer_config_msg;
 
 	/* TODO: add support for asynchronous transfers */
 	if (req->async) {
@@ -588,16 +554,23 @@ static int api_transceive(const struct device *dev, const struct mspi_dev_id *de
 		return -EFAULT;
 	}
 
-	drv_data->xfer = *req;
+	mspi_xfer_config_msg.opcode = NRFE_MSPI_CONFIG_XFER;
+	mspi_xfer_config_msg.xfer_config.device_index = dev_id->dev_idx;
+	mspi_xfer_config_msg.xfer_config.command_length = req->cmd_length;
+	mspi_xfer_config_msg.xfer_config.address_length = req->addr_length;
+	mspi_xfer_config_msg.xfer_config.hold_ce = req->hold_ce;
+	mspi_xfer_config_msg.xfer_config.tx_dummy = req->tx_dummy;
+	mspi_xfer_config_msg.xfer_config.rx_dummy = req->rx_dummy;
 
-	rc = send_config(NRFE_MSPI_CONFIG_XFER, (void *)&drv_data->xfer, sizeof(struct mspi_xfer));
+	rc = send_config(NRFE_MSPI_CONFIG_XFER, (void *)&mspi_xfer_config_msg,
+			 sizeof(nrfe_mspi_xfer_config_msg_t));
 	if (rc < 0) {
 		LOG_ERR("Send xfer config error: %d", rc);
 		return rc;
 	}
 
-	while (packets_done < drv_data->xfer.num_packet) {
-		rc = start_next_packet(&drv_data->xfer, packets_done);
+	while (packets_done < req->num_packet) {
+		rc = start_next_packet((struct mspi_xfer *)req, packets_done);
 		if (rc < 0) {
 			LOG_ERR("Start next packet error: %d", rc);
 			return rc;
@@ -710,5 +683,5 @@ static const struct mspi_driver_api drv_api = {
 
 PM_DEVICE_DT_INST_DEFINE(0, dev_pm_action_cb);
 
-DEVICE_DT_INST_DEFINE(0, nrfe_mspi_init, PM_DEVICE_DT_INST_GET(0), &dev_data, &dev_config,
-		      POST_KERNEL, CONFIG_MSPI_NRFE_INIT_PRIORITY, &drv_api);
+DEVICE_DT_INST_DEFINE(0, nrfe_mspi_init, PM_DEVICE_DT_INST_GET(0), NULL, &dev_config, POST_KERNEL,
+		      CONFIG_MSPI_NRFE_INIT_PRIORITY, &drv_api);
