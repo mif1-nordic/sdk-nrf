@@ -21,9 +21,12 @@
 #define BITS_IN_WORD 32
 #define BITS_IN_BYTE 8
 
+#define DUMMY_CYCLES_BUS_WIDTH 1
+
 typedef enum {
 	HRT_FE_COMMAND,
 	HRT_FE_ADDRESS,
+	HRT_FE_DUMMY_CYCLES,
 	HRT_FE_DATA,
 	HRT_FE_MAX
 } hrt_frame_element_t;
@@ -78,7 +81,9 @@ typedef struct {
 	/** @brief Data for all transfer parts */
 	hrt_xfer_data_t xfer_data[HRT_FE_MAX];
 
-	/** @brief Bus widths for different transfer parts (command, address, and data). */
+	/** @brief Bus widths for different transfer parts (command, address, and
+	 * data).
+	 */
 	hrt_xfer_bus_widths_t bus_widths;
 
 	/** @brief Timer value, used for setting clock frequency
