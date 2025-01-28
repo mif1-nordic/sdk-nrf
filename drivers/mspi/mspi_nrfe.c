@@ -157,7 +157,7 @@ static void ep_recv(const void *data, size_t len, void *priv)
 	}
 	}
 
-	LOG_DBG("Received msg with opcode: %d", response->opcode);
+	LOG_HEXDUMP_DBG((uint8_t *)data, len, "Received msg:");
 }
 
 /**
@@ -473,8 +473,12 @@ static int xfer_packet(struct mspi_xfer_packet *packet, uint32_t timeout)
 
 	/* Wait for the transfer to complete and receive data. */
 	if ((packet->dir == MSPI_RX) && (ipc_receive_buffer != NULL) && (ipc_received > 0)) {
-		memcpy((void *)packet->data_buf, (void *)ipc_receive_buffer, ipc_received);
-		packet->num_bytes = ipc_received;
+		/*
+		 * Writing to packet->num_bytes causes memory access errors, so for now
+		 * number of received data is stored in the first byte in data buffer.
+		 */
+		packet->data_buf[0] = ipc_received;
+		memcpy((void *)(packet->data_buf + 1), (void *)ipc_receive_buffer, ipc_received);
 
 		/* Clear the receive buffer pointer and size */
 		ipc_receive_buffer = NULL;
