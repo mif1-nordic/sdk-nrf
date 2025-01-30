@@ -228,7 +228,7 @@ hrt_write:
 	beq	a3,a2,.L26
 	li	a5,32
 	div	a5,a5,a4
-	j	.L43
+	j	.L42
 .L22:
 	lbu	a4,81(s0)
 	j	.L24
@@ -237,14 +237,14 @@ hrt_write:
 	j	.L24
 .L25:
 	lbu	a5,8(a5)
-.L43:
+.L42:
  #APP
 	csrw 3022, a5
  #NO_APP
-	lbu	a4,86(s0)
+	lbu	a4,87(s0)
 	li	a5,1
 	sll	a5,a5,a4
-	lbu	a4,88(s0)
+	lbu	a4,89(s0)
 	slli	a5,a5,16
 	srli	a5,a5,16
 	bne	a4,zero,.L29
@@ -272,18 +272,8 @@ hrt_write:
 	addi	a2,sp,3
 	addi	a0,s0,60
 	call	hrt_tx
-	lbu	a5,89(s0)
-	beq	a5,zero,.L31
-.L32:
- #APP
-	csrr a5, 3022
- #NO_APP
-	andi	a5,a5,0xff
-	bne	a5,zero,.L32
- #APP
-	csrw 2010, 0
- #NO_APP
-.L31:
+	lbu	a5,94(s0)
+	bne	a5,zero,.L31
 	li	a5,16384
 	addi	a5,a5,1
  #APP
@@ -291,15 +281,19 @@ hrt_write:
 	csrw 3017, 0
 	csrw 2000, 0
  #NO_APP
-	lbu	a5,87(s0)
+.L32:
+ #APP
+	csrw 2005, 0
+ #NO_APP
+	lbu	a5,88(s0)
 	bne	a5,zero,.L19
-	lbu	a4,86(s0)
+	lbu	a4,87(s0)
 	li	a5,1
 	sll	a5,a5,a4
-	lbu	a4,88(s0)
+	lbu	a4,89(s0)
 	slli	a5,a5,16
 	srli	a5,a5,16
-	bne	a4,zero,.L34
+	bne	a4,zero,.L35
  #APP
 	csrs 3008, a5
  #NO_APP
@@ -310,13 +304,49 @@ hrt_write:
 	jr	ra
 .L26:
 	lbu	a5,9(a5)
-	j	.L43
+	j	.L42
 .L29:
  #APP
 	csrs 3008, a5
  #NO_APP
 	j	.L30
-.L34:
+.L31:
+ #APP
+	csrr a5, 3022
+ #NO_APP
+	andi	a5,a5,0xff
+	bne	a5,zero,.L31
+ #APP
+	csrw 2000, 0
+ #NO_APP
+	li	a5,16384
+	addi	a5,a5,1
+ #APP
+	csrw 3019, a5
+ #NO_APP
+	lbu	a5,94(s0)
+	li	a4,1
+	bne	a5,a4,.L33
+	lbu	a4,86(s0)
+	sll	a5,a5,a4
+	slli	a5,a5,16
+	srli	a5,a5,16
+ #APP
+	csrc 3008, a5
+ #NO_APP
+	j	.L32
+.L33:
+	li	a3,3
+	bne	a5,a3,.L32
+	lbu	a5,86(s0)
+	sll	a4,a4,a5
+	slli	a4,a4,16
+	srli	a4,a4,16
+ #APP
+	csrs 3008, a4
+ #NO_APP
+	j	.L32
+.L35:
  #APP
 	csrc 3008, a5
  #NO_APP
