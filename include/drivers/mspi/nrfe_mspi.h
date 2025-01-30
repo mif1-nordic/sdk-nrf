@@ -16,6 +16,8 @@ extern "C" {
 
 #ifdef CONFIG_SOC_NRF54L15
 
+#define NRFE_MSPI_NO_COPY_IPC
+
 #define NRFE_MSPI_DEVICES_MAX	5
 #define NRFE_MSPI_DATA_PINS_MAX 8
 #define NRFE_MSPI_VIO_COUNT	11
@@ -88,7 +90,11 @@ typedef struct {
 	uint32_t command;
 	uint32_t address;
 	uint32_t num_bytes;
+#ifdef NRFE_MSPI_NO_COPY_IPC
+	uint8_t *data;
+#else
 	uint8_t data[];
+#endif
 } nrfe_mspi_xfer_packet_msg_t;
 
 #ifdef __cplusplus
