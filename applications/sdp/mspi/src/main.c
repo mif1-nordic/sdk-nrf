@@ -256,6 +256,7 @@ void prepare_and_read_data(nrfe_mspi_xfer_packet_msg_t *xfer_packet, volatile ui
 	volatile nrfe_mspi_dev_config_t *device =
 		&nrfe_mspi_devices[nrfe_mspi_xfer_config.device_index];
 	nrf_vpr_csr_vio_config_t config;
+	uint32_t dummy_cycles_data = 0x00000000;
 
 	xfer_params.counter_value = 4;
 	xfer_params.ce_vio = ce_vios[device->ce_index];
@@ -290,6 +291,13 @@ void prepare_and_read_data(nrfe_mspi_xfer_packet_msg_t *xfer_packet, volatile ui
 		nrf_vpr_csr_vio_out_buffered_reversed_word_set;
 	xfer_params.xfer_data[HRT_FE_ADDRESS].data = (uint8_t *)&xfer_packet->address;
 	xfer_params.xfer_data[HRT_FE_ADDRESS].word_count = nrfe_mspi_xfer_config.address_length;
+
+	/* Configure dummy_cycles phase. */
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].vio_out_set =
+		nrf_vpr_csr_vio_out_buffered_reversed_word_set;
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].data = (uint8_t *)&dummy_cycles_data;
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].word_count =
+		nrfe_mspi_xfer_config.rx_dummy * xfer_params.bus_widths.dummy_cycles;
 
 	/* Configure data phase. */
 	xfer_params.xfer_data[HRT_FE_DATA].word_count = xfer_packet->num_bytes;
