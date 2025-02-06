@@ -337,8 +337,14 @@ static int api_config(const struct mspi_dt_spec *spec)
 	mspi_pin_config.opcode = NRFE_MSPI_CONFIG_PINS;
 
 	/* Send pinout configuration to FLPR */
+#ifdef NRFE_MSPI_NO_COPY_IPC
+	void *pin_config_ptr = &mspi_pin_config;
+
+	return send_config(NRFE_MSPI_CONFIG_PINS, (const void *)&pin_config_ptr, sizeof(void *));
+#else
 	return send_config(NRFE_MSPI_CONFIG_PINS, (const void *)&mspi_pin_config,
 			   sizeof(nrfe_mspi_pinctrl_soc_pin_msg_t));
+#endif
 }
 
 static int check_io_mode(enum mspi_io_mode io_mode)
@@ -425,6 +431,11 @@ static int api_dev_config(const struct device *dev, const struct mspi_dev_id *de
 	mspi_dev_config_msg.dev_config.freq = cfg->freq;
 	mspi_dev_config_msg.dev_config.ce_index = cfg->ce_num;
 
+#ifdef NRFE_MSPI_NO_COPY_IPC
+	void *dev_config_ptr = &mspi_dev_config_msg;
+
+	return send_config(NRFE_MSPI_CONFIG_DEV, (const void *)&dev_config_ptr, sizeof(void *));
+#else
 	return send_config(NRFE_MSPI_CONFIG_DEV, (void *)&mspi_dev_config_msg,
 			   sizeof(nrfe_mspi_dev_config_msg_t));
 }
@@ -449,11 +460,24 @@ static int api_get_channel_status(const struct device *dev, uint8_t ch)
 static int xfer_packet(struct mspi_xfer_packet *packet, uint32_t timeout)
 {
 	int rc;
+	nrfe_mspi_opcode_t opcode = (packet->dir == MSPI_RX) ? NRFE_MSPI_TXRX : NRFE_MSPI_TX;
+
+#ifdef NRFE_MSPI_NO_COPY_IPC
+	nrfe_mspi_xfer_packet_msg_t xfer_packet = {.opcode = opcode,
+						   .command = packet->cmd,
+						   .address = packet->address,
+						   .num_bytes = packet->num_bytes,
+						   .data = packet->data_buf};
+
+	void *xfer_packet_ptr = (void *)&xfer_packet;
+
+	rc = mspi_ipc_data_send(xfer_packet.opcode, &xfer_packet_ptr, sizeof(void *));
+#else
 	uint32_t len = sizeof(nrfe_mspi_xfer_packet_msg_t) + packet->num_bytes;
 	uint8_t buffer[len];
 	nrfe_mspi_xfer_packet_msg_t *xfer_packet = (nrfe_mspi_xfer_packet_msg_t *)buffer;
 
-	xfer_packet->opcode = (packet->dir == MSPI_RX) ? NRFE_MSPI_TXRX : NRFE_MSPI_TX;
+	xfer_packet->opcode = opcode;
 	xfer_packet->command = packet->cmd;
 	xfer_packet->address = packet->address;
 	xfer_packet->num_bytes = packet->num_bytes;
@@ -461,11 +485,13 @@ static int xfer_packet(struct mspi_xfer_packet *packet, uint32_t timeout)
 	memcpy((void *)xfer_packet->data, (void *)packet->data_buf, packet->num_bytes);
 
 	rc = mspi_ipc_data_send(xfer_packet->opcode, buffer, len);
+#endif
+
 	if (rc < 0) {
 		LOG_ERR("Packet transfer error: %d", rc);
 	}
 
-	rc = nrfe_mspi_wait_for_response(xfer_packet->opcode, timeout);
+	rc = nrfe_mspi_wait_for_response(opcode, timeout);
 	if (rc < 0) {
 		LOG_ERR("FLPR Xfer response timeout: %d", rc);
 		return rc;
@@ -550,8 +576,16 @@ static int api_transceive(const struct device *dev, const struct mspi_dev_id *de
 	mspi_xfer_config_msg.xfer_config.tx_dummy = req->tx_dummy;
 	mspi_xfer_config_msg.xfer_config.rx_dummy = req->rx_dummy;
 
+#ifdef NRFE_MSPI_NO_COPY_IPC
+
+	void *xfer_config_ptr = (void *)&mspi_xfer_config_msg;
+
+	rc = send_config(NRFE_MSPI_CONFIG_XFER, &xfer_config_ptr, sizeof(void *));
+#else
 	rc = send_config(NRFE_MSPI_CONFIG_XFER, (void *)&mspi_xfer_config_msg,
 			 sizeof(nrfe_mspi_xfer_config_msg_t));
+#endif
+
 	if (rc < 0) {
 		LOG_ERR("Send xfer config error: %d", rc);
 		return rc;
