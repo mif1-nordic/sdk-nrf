@@ -63,8 +63,9 @@ static volatile uint8_t ce_vios_count;
 static volatile uint8_t ce_vios[DEVICES_MAX];
 static volatile uint8_t data_vios_count;
 static volatile uint8_t data_vios[DATA_PINS_MAX];
-static volatile nrfe_mspi_xfer_config_t nrfe_mspi_xfer_config;
 static volatile nrfe_mspi_dev_config_t nrfe_mspi_devices[DEVICES_MAX];
+static volatile nrfe_mspi_xfer_config_t nrfe_mspi_xfer_config;
+static volatile nrfe_mspi_xfer_config_t *nrfe_mspi_xfer_config_ptr = &nrfe_mspi_xfer_config;
 
 static volatile hrt_xfer_t xfer_params;
 
@@ -172,11 +173,11 @@ static void configure_clock(enum mspi_cpp_mode cpp_mode)
 static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 {
 	volatile nrfe_mspi_dev_config_t *device =
-		&nrfe_mspi_devices[nrfe_mspi_xfer_config.device_index];
+		&nrfe_mspi_devices[nrfe_mspi_xfer_config_ptr->device_index];
 
 	xfer_params.counter_value = 4;
 	xfer_params.ce_vio = ce_vios[device->ce_index];
-	xfer_params.ce_hold = nrfe_mspi_xfer_config.hold_ce;
+	xfer_params.ce_hold = nrfe_mspi_xfer_config_ptr->hold_ce;
 	xfer_params.cpp_mode = device->cpp;
 	xfer_params.ce_polarity = device->ce_polarity;
 	xfer_params.bus_widths = io_modes[device->io_mode];
@@ -187,10 +188,10 @@ static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 	 */
 	xfer_packet->command =
 		xfer_packet->command
-		<< (BITS_IN_WORD - nrfe_mspi_xfer_config.command_length * BITS_IN_BYTE);
+		<< (BITS_IN_WORD - nrfe_mspi_xfer_config_ptr->command_length * BITS_IN_BYTE);
 	xfer_packet->address =
 		xfer_packet->address
-		<< (BITS_IN_WORD - nrfe_mspi_xfer_config.address_length * BITS_IN_BYTE);
+		<< (BITS_IN_WORD - nrfe_mspi_xfer_config_ptr->address_length * BITS_IN_BYTE);
 
 	xfer_params.xfer_data[HRT_FE_COMMAND].vio_out_set =
 		&nrf_vpr_csr_vio_out_buffered_reversed_word_set;
@@ -198,7 +199,7 @@ static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 	xfer_params.xfer_data[HRT_FE_COMMAND].word_count = 0;
 
 	adjust_tail(&xfer_params.xfer_data[HRT_FE_COMMAND], xfer_params.bus_widths.command,
-		    nrfe_mspi_xfer_config.command_length * BITS_IN_BYTE);
+		    nrfe_mspi_xfer_config_ptr->command_length * BITS_IN_BYTE);
 
 	xfer_params.xfer_data[HRT_FE_ADDRESS].vio_out_set =
 		&nrf_vpr_csr_vio_out_buffered_reversed_word_set;
@@ -206,7 +207,7 @@ static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 	xfer_params.xfer_data[HRT_FE_ADDRESS].word_count = 0;
 
 	adjust_tail(&xfer_params.xfer_data[HRT_FE_ADDRESS], xfer_params.bus_widths.address,
-		    nrfe_mspi_xfer_config.address_length * BITS_IN_BYTE);
+		    nrfe_mspi_xfer_config_ptr->address_length * BITS_IN_BYTE);
 
 	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].vio_out_set =
 		&nrf_vpr_csr_vio_out_buffered_reversed_word_set;
@@ -214,19 +215,20 @@ static void xfer_execute(nrfe_mspi_xfer_packet_msg_t *xfer_packet)
 	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].word_count = 0;
 
 	hrt_frame_element_t elem =
-		nrfe_mspi_xfer_config.address_length != 0 ? HRT_FE_ADDRESS : HRT_FE_COMMAND;
+		nrfe_mspi_xfer_config_ptr->address_length != 0 ? HRT_FE_ADDRESS : HRT_FE_COMMAND;
 
 	/* Up to 63 clock pulses (including data from previous part) can be sent by simply
 	 * increasing shift count of last word in the previous part.
 	 * Beyond that, dummy cycles have to be treated af different transfer part.
 	 */
-	if (xfer_params.xfer_data[elem].last_word_clocks + nrfe_mspi_xfer_config.tx_dummy <=
+	if (xfer_params.xfer_data[elem].last_word_clocks + nrfe_mspi_xfer_config_ptr->tx_dummy <=
 	    MAX_SHIFT_COUNT) {
-		xfer_params.xfer_data[elem].last_word_clocks += nrfe_mspi_xfer_config.tx_dummy;
+		xfer_params.xfer_data[elem].last_word_clocks += nrfe_mspi_xfer_config_ptr->tx_dummy;
 	} else {
 		adjust_tail(&xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES],
 			    xfer_params.bus_widths.dummy_cycles,
-			    nrfe_mspi_xfer_config.tx_dummy*xfer_params.bus_widths.dummy_cycles);
+			    nrfe_mspi_xfer_config_ptr->tx_dummy *
+				    xfer_params.bus_widths.dummy_cycles);
 	}
 
 	xfer_params.xfer_data[HRT_FE_DATA].vio_out_set =
@@ -309,6 +311,10 @@ static void ep_bound(void *priv)
 
 static void ep_recv(const void *data, size_t len, void *priv)
 {
+#ifdef NRFE_MSPI_NO_COPY_IPC
+	data = *(void **)data;
+#endif
+
 	(void)priv;
 	(void)len;
 	nrfe_mspi_flpr_response_msg_t response;
@@ -347,6 +353,7 @@ static void ep_recv(const void *data, size_t len, void *priv)
 		break;
 	}
 	case NRFE_MSPI_CONFIG_XFER: {
+
 		nrfe_mspi_xfer_config_msg_t *xfer_config = (nrfe_mspi_xfer_config_msg_t *)data;
 
 		NRFX_ASSERT(xfer_config->xfer_config.device_index < DEVICES_MAX);
@@ -359,9 +366,12 @@ static void ep_recv(const void *data, size_t len, void *priv)
 			    xfer_config->xfer_config.command_length != 0 ||
 			    xfer_config->xfer_config.address_length != 0);
 
+#ifdef NRFE_MSPI_NO_COPY_IPC
+		nrfe_mspi_xfer_config_ptr = &xfer_config->xfer_config;
+#else
 		nrfe_mspi_xfer_config = xfer_config->xfer_config;
-
-		configure_clock(nrfe_mspi_devices[nrfe_mspi_xfer_config.device_index].cpp);
+#endif
+		configure_clock(nrfe_mspi_devices[nrfe_mspi_xfer_config_ptr->device_index].cpp);
 		break;
 	}
 	case NRFE_MSPI_TX:

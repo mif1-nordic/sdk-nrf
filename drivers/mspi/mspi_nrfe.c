@@ -438,6 +438,7 @@ static int api_dev_config(const struct device *dev, const struct mspi_dev_id *de
 #else
 	return send_config(NRFE_MSPI_CONFIG_DEV, (void *)&mspi_dev_config_msg,
 			   sizeof(nrfe_mspi_dev_config_msg_t));
+#endif
 }
 
 static int api_get_channel_status(const struct device *dev, uint8_t ch)
