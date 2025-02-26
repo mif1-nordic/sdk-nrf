@@ -274,7 +274,6 @@ void prepare_and_read_data(nrfe_mspi_xfer_packet_msg_t *xfer_packet, volatile ui
 	xfer_params.ce_hold = nrfe_mspi_xfer_config_ptr->hold_ce;
 	xfer_params.ce_polarity = device->ce_polarity;
 	xfer_params.bus_widths = io_modes[device->io_mode];
-	xfer_params.xfer_data[HRT_FE_DATA].data = buffer;
 
 	nrf_vpr_csr_vio_config_get(&config);
 	config.input_sel = true;
@@ -296,22 +295,44 @@ void prepare_and_read_data(nrfe_mspi_xfer_packet_msg_t *xfer_packet, volatile ui
 	xfer_params.xfer_data[HRT_FE_COMMAND].data = (uint8_t *)&xfer_packet->command;
 	xfer_params.xfer_data[HRT_FE_COMMAND].word_count =
 		nrfe_mspi_xfer_config_ptr->command_length;
+	adjust_tail(&xfer_params.xfer_data[HRT_FE_COMMAND], xfer_params.bus_widths.command,
+			nrfe_mspi_xfer_config_ptr->command_length * BITS_IN_BYTE);
 
 	/* Configure address phase. */
 	xfer_params.xfer_data[HRT_FE_ADDRESS].fun_out = HRT_FUN_OUT_WORD;
 	xfer_params.xfer_data[HRT_FE_ADDRESS].data = (uint8_t *)&xfer_packet->address;
 	xfer_params.xfer_data[HRT_FE_ADDRESS].word_count =
 		nrfe_mspi_xfer_config_ptr->address_length;
+	adjust_tail(&xfer_params.xfer_data[HRT_FE_ADDRESS], xfer_params.bus_widths.address,
+			nrfe_mspi_xfer_config_ptr->address_length * BITS_IN_BYTE);
 
 	/* Configure dummy_cycles phase. */
 	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].fun_out = HRT_FUN_OUT_WORD;
-	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].data = (uint8_t *)&dummy_cycles_data;
-	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].word_count =
-		nrfe_mspi_xfer_config_ptr->rx_dummy * xfer_params.bus_widths.dummy_cycles /
-		BITS_IN_BYTE;
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].data = NULL;
+	xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES].word_count = 0;
+
+	hrt_frame_element_t elem =
+		nrfe_mspi_xfer_config_ptr->address_length != 0 ? HRT_FE_ADDRESS : HRT_FE_COMMAND;
+
+	/* Up to 63 clock pulses (including data from previous part) can be sent by simply
+	 * increasing shift count of last word in the previous part.
+	 * Beyond that, dummy cycles have to be treated af different transfer part.
+	 */
+	if (xfer_params.xfer_data[elem].last_word_clocks + nrfe_mspi_xfer_config_ptr->tx_dummy <=
+	    MAX_SHIFT_COUNT) {
+		xfer_params.xfer_data[elem].last_word_clocks += nrfe_mspi_xfer_config_ptr->tx_dummy;
+	} else {
+		adjust_tail(&xfer_params.xfer_data[HRT_FE_DUMMY_CYCLES],
+			    xfer_params.bus_widths.dummy_cycles,
+			    nrfe_mspi_xfer_config_ptr->tx_dummy *
+				    xfer_params.bus_widths.dummy_cycles);
+	}
 
 	/* Configure data phase. */
-	xfer_params.xfer_data[HRT_FE_DATA].word_count = xfer_packet->num_bytes;
+	xfer_params.xfer_data[HRT_FE_DATA].data = buffer;
+	xfer_params.xfer_data[HRT_FE_DATA].word_count = 0;
+	adjust_tail(&xfer_params.xfer_data[HRT_FE_DATA], xfer_params.bus_widths.data,
+		xfer_packet->num_bytes * BITS_IN_BYTE);
 
 	/* Read/write barrier to make sure that all configuration is done before jumping to HRT. */
 	nrf_barrier_rw();
@@ -374,12 +395,12 @@ static void ep_bound(void *priv)
 	atomic_set_bit(&ipc_atomic_sem, NRFE_MSPI_EP_BOUNDED);
 }
 
-static void ep_recv(const void *data, size_t len, void *priv)
+static void ep_recv(volatile const void *data, size_t len, void *priv)
 {
 #ifdef CONFIG_SDP_MSPI_IPC_NO_COPY
 	data = *(void **)data;
 #endif
-
+volatile void* ptr = data;
 	(void)priv;
 	(void)len;
 	nrfe_mspi_flpr_response_msg_t response;
@@ -453,8 +474,12 @@ static void ep_recv(const void *data, size_t len, void *priv)
 		xfer_execute(packet);
 		break;
 	case NRFE_MSPI_TXRX: {
+		
 		nrfe_mspi_xfer_packet_msg_t *packet = (nrfe_mspi_xfer_packet_msg_t *)data;
 		num_bytes = packet->num_bytes;
+
+		volatile bool lock=true;
+		while(lock){}
 
 		if (num_bytes > 0) {
 			prepare_and_read_data(packet, response_buffer + 1);
@@ -518,6 +543,8 @@ __attribute__((interrupt)) void hrt_handler_write(void)
 
 int main(void)
 {
+	for(volatile uint32_t i=0; i<1000000; i++){}
+	
 	int ret = backend_init();
 
 	if (ret < 0) {

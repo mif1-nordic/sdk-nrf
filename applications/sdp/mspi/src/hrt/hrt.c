@@ -269,8 +269,434 @@ static void hrt_tx_rx(volatile hrt_xfer_data_t *xfer_data, uint8_t frame_width, 
 	}
 }
 
+void hrt_my_read(volatile hrt_xfer_t *hrt_xfer_params)
+{
+
+	hrt_xfer_params->xfer_data[HRT_FE_COMMAND].last_word = 0x9f000000;
+	hrt_xfer_params->xfer_data[HRT_FE_COMMAND].last_word_clocks = 8;
+	hrt_xfer_params->xfer_data[HRT_FE_COMMAND].penultimate_word_clocks = 32;
+	hrt_xfer_params->xfer_data[HRT_FE_COMMAND].word_count = 1;
+
+	hrt_xfer_params->xfer_data[HRT_FE_ADDRESS].last_word = 0x000000;
+	hrt_xfer_params->xfer_data[HRT_FE_ADDRESS].last_word_clocks = 24;
+	hrt_xfer_params->xfer_data[HRT_FE_ADDRESS].penultimate_word_clocks = 32;
+	hrt_xfer_params->xfer_data[HRT_FE_ADDRESS].word_count = 0;
+
+	hrt_xfer_params->xfer_data[HRT_FE_DUMMY_CYCLES].data = NULL;
+	hrt_xfer_params->xfer_data[HRT_FE_DUMMY_CYCLES].last_word = 0x00;
+	hrt_xfer_params->xfer_data[HRT_FE_DUMMY_CYCLES].last_word_clocks = 8;
+	hrt_xfer_params->xfer_data[HRT_FE_DUMMY_CYCLES].penultimate_word_clocks = 32;
+	hrt_xfer_params->xfer_data[HRT_FE_DUMMY_CYCLES].word_count = 0;
+
+
+
+
+	hrt_frame_element_t first_element = HRT_FE_DATA;
+	bool counter_running = false;
+
+	nrf_vpr_csr_vio_mode_out_t out_mode = {.mode = NRF_VPR_CSR_VIO_SHIFT_OUTB_TOGGLE};
+
+	/* Configure clock and pins */
+	nrf_vpr_csr_vio_dir_set(hrt_xfer_params->tx_direction_mask);
+
+	for (uint8_t i = 0; i < HRT_FE_MAX; i++) {
+
+		if (hrt_xfer_params->xfer_data[i].word_count != 0) {
+			first_element = i;
+			break;
+		}
+	}
+
+	switch (first_element) {
+	case HRT_FE_COMMAND:
+		out_mode.frame_width = hrt_xfer_params->bus_widths.command;
+		break;
+	case HRT_FE_ADDRESS:
+		out_mode.frame_width = hrt_xfer_params->bus_widths.address;
+		break;
+	case HRT_FE_DATA:
+		out_mode.frame_width = hrt_xfer_params->bus_widths.data;
+		break;
+	default:
+		break;
+	}
+	xfer_shift_ctrl.frame_width = out_mode.frame_width;
+
+	nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_RELOAD);
+	nrf_vpr_csr_vtim_simple_counter_top_set(0, hrt_xfer_params->counter_value);
+	nrf_vpr_csr_vio_mode_in_set(NRF_VPR_CSR_VIO_MODE_IN_CONTINUOUS);
+
+	nrf_vpr_csr_vio_mode_out_set(&out_mode);
+
+	switch (hrt_xfer_params->xfer_data[first_element].word_count) {
+	case 1:
+		nrf_vpr_csr_vio_shift_cnt_out_set(
+			hrt_xfer_params->xfer_data[first_element].last_word_clocks);
+		break;
+	case 2:
+		nrf_vpr_csr_vio_shift_cnt_out_set(
+			hrt_xfer_params->xfer_data[first_element].penultimate_word_clocks);
+		break;
+	default:
+		nrf_vpr_csr_vio_shift_cnt_out_set(BITS_IN_WORD / out_mode.frame_width);
+	}
+
+	/* Enable CE */
+	if (hrt_xfer_params->ce_polarity == MSPI_CE_ACTIVE_LOW) {
+		nrf_vpr_csr_vio_out_clear_set(BIT(hrt_xfer_params->ce_vio));
+	} else {
+		nrf_vpr_csr_vio_out_or_set(BIT(hrt_xfer_params->ce_vio));
+	}
+
+	/* Transfer command */
+	hrt_tx(&hrt_xfer_params->xfer_data[HRT_FE_COMMAND], hrt_xfer_params->bus_widths.command,
+	       &counter_running, hrt_xfer_params->counter_value);
+	/* Transfer address */
+	hrt_tx(&hrt_xfer_params->xfer_data[HRT_FE_ADDRESS], hrt_xfer_params->bus_widths.address,
+	       &counter_running, hrt_xfer_params->counter_value);
+	/* Transfer dummy cycles */
+	hrt_tx(&hrt_xfer_params->xfer_data[HRT_FE_DUMMY_CYCLES],
+	       hrt_xfer_params->bus_widths.dummy_cycles, &counter_running,
+	       hrt_xfer_params->counter_value);
+
+	/* Hardware issue workaround,
+	 * additional clock edge when transmitting in modes other than MSPI_CPP_MODE_0.
+	 * modes 1 and 3: Disable clock before the last pulse and perform last clock edge manualy.
+	 * mode 2: Add one pulse more to the last word in message, and disable clock before the last
+	 * pulse.
+	 */
+	if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_0) {
+		nrf_vpr_csr_vio_shift_ctrl_buffered_set(&write_final_shift_ctrl_cfg);
+		nrf_vpr_csr_vio_out_buffered_reversed_word_set(0x08100000);
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+	} else {
+		while (nrf_vpr_csr_vio_shift_cnt_out_get() != 0) {
+		}
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+
+		nrf_vpr_csr_vio_shift_ctrl_buffered_set(&write_final_shift_ctrl_cfg);
+
+		if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_1) {
+			nrf_vpr_csr_vio_out_clear_set(BIT(hrt_xfer_params->clk_vio));
+		} else if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_3) {
+			nrf_vpr_csr_vio_out_or_set(BIT(hrt_xfer_params->clk_vio));
+		}
+	}
+
+	/* Reset counter 0, Next message may be sent incorrectly if counter is not reset here. */
+	nrf_vpr_csr_vtim_simple_counter_set(0, 0);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	static const nrf_vpr_csr_vio_shift_ctrl_t shift_ctrl = {
+		.out_mode = NRF_VPR_CSR_VIO_SHIFT_NONE,
+		.in_mode = NRF_VPR_CSR_VIO_MODE_IN_CONTINUOUS,
+	};
+	
+	out_mode.mode = NRF_VPR_CSR_VIO_SHIFT_OUTB_TOGGLE;
+	out_mode.frame_width = 1;
+
+	/* Configure clock and pins */
+	/* Set DQ1 as input */
+	WRITE_BIT(hrt_xfer_params->tx_direction_mask, SPI_INPUT_PIN_NUM, VPRCSR_NORDIC_DIR_INPUT);
+	nrf_vpr_csr_vio_dir_set(hrt_xfer_params->tx_direction_mask);
+
+	/* Initial configuration */
+	nrf_vpr_csr_vio_mode_in_set(NRF_VPR_CSR_VIO_MODE_IN_SHIFT);
+	nrf_vpr_csr_vio_mode_out_set(&out_mode);
+	nrf_vpr_csr_vio_shift_cnt_out_set(1);
+
+	/* Counter settings */
+	nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_RELOAD);
+	nrf_vpr_csr_vtim_count_mode_set(1, NRF_VPR_CSR_VTIM_COUNT_RELOAD);
+
+	/* Set top counters value. Trigger data capture every two clock cycles */
+	nrf_vpr_csr_vtim_simple_counter_top_set(0, hrt_xfer_params->counter_value);
+	nrf_vpr_csr_vtim_simple_counter_top_set(1,
+						CNT1_TOP_CALCULATE(hrt_xfer_params->counter_value));
+
+
+	nrf_vpr_csr_vio_shift_ctrl_t shift_ctrl1 = {
+		.shift_count = 31,
+		.out_mode = NRF_VPR_CSR_VIO_SHIFT_OUTB_TOGGLE,
+		.frame_width = hrt_xfer_params->bus_widths.command,
+		.in_mode = NRF_VPR_CSR_VIO_MODE_IN_SHIFT,
+	};
+
+
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl1);
+
+	nrf_vpr_csr_vio_out_buffered_reversed_word_set(0x00);
+
+	nrf_vpr_csr_vtim_combined_counter_set(
+		(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+		(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+	
+		
+volatile uint32_t d[3];
+/* 2 cycles */
+while(nrf_vpr_csr_vio_shift_cnt_in_get() > 0){}
+nrf_vpr_csr_vtim_simple_counter_top_set(0, 1000);
+nrf_vpr_csr_vtim_combined_counter_set(
+	(1000 << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+	(2000 << VPRCSR_NORDIC_CNT_CNT1_Pos));
+d[0] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get()&0x03000000;
+
+
+/* 3 or more cycles */
+/*shift_ctrl1.shift_count = 0;
+nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl1);
+nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+
+while(nrf_vpr_csr_vio_shift_cnt_in_get() > 0){}
+nrf_vpr_csr_vtim_simple_counter_top_set(0, 1000);
+nrf_vpr_csr_vtim_combined_counter_set(
+	(1000 << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+	(2000 << VPRCSR_NORDIC_CNT_CNT1_Pos));
+d[0] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();*/
+
+/*
+	shift_ctrl1.shift_count = 29;
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl1);
+	d[0] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+	shift_ctrl1.shift_count = 31;
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl1);
+	d[1] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+
+	while(nrf_vpr_csr_vio_shift_cnt_in_get() > 0){}
+	
+	nrf_vpr_csr_vtim_simple_counter_top_set(0, 1000);
+
+	nrf_vpr_csr_vtim_combined_counter_set(
+		(1000 << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+		(2000 << VPRCSR_NORDIC_CNT_CNT1_Pos));
+
+	d[2] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		
+		
+	*/
+
+	for(uint32_t i=0; i<3; i++) {
+		d[i] = ((d[i] << 8) & 0xFF00FF00 ) | ((d[i] >> 8) & 0xFF00FF ); 
+		d[i] = (d[i] << 16) | (d[i] >> 16);
+	}
+
+
+/*
+0xC22817C22817C228
+  110000100010100000010111110000100010100000010111110000100010100000010111110000100010100000010111
+0011000010001010000001011111000010001010000001011111000010001010000001011111000010001010000001011111
+0x308a05f08a05f08a05f08a05f
+
+0xC22817C22817C228
+
+0x60006003
+0xc22817c22817c228
+*/
+
+	/*for (uint32_t i = 0; i < hrt_xfer_params->xfer_data[HRT_FE_DATA].word_count; i++) {
+		hrt_xfer_params->xfer_data[HRT_FE_DATA].data[i] =
+			nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >> INPUT_SHIFT_COUNT;
+	}*/
+
+	/* Stop counters */
+	nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+	nrf_vpr_csr_vtim_count_mode_set(1, NRF_VPR_CSR_VTIM_COUNT_STOP);
+
+	/* Final configuration */
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl);
+
+	/* Disable CS */
+	if (!hrt_xfer_params->ce_hold) {
+
+		if (hrt_xfer_params->ce_polarity == MSPI_CE_ACTIVE_LOW) {
+			nrf_vpr_csr_vio_out_or_set(BIT(hrt_xfer_params->ce_vio));
+		} else {
+			nrf_vpr_csr_vio_out_clear_set(BIT(hrt_xfer_params->ce_vio));
+		}
+	}
+
+	/* Set DQ1 back as output. */
+	WRITE_BIT(hrt_xfer_params->tx_direction_mask, SPI_INPUT_PIN_NUM, VPRCSR_NORDIC_DIR_OUTPUT);
+	nrf_vpr_csr_vio_dir_set(hrt_xfer_params->tx_direction_mask);
+
+	volatile bool lock=true;
+	while(lock){}
+
+}
+
+void hrt_read_new(volatile hrt_xfer_t *hrt_xfer_params)
+{
+	uint32_t data_length = hrt_xfer_params->xfer_data[HRT_FE_DATA].word_count;
+	bool hold = hrt_xfer_params->ce_hold;
+	
+	/* Write only command address and dummy cycles and keep CS active. */
+	hrt_xfer_params->xfer_data[HRT_FE_DATA].word_count = 0;
+	hrt_xfer_params->ce_hold = true;
+	hrt_write(hrt_xfer_params);
+
+	nrf_vpr_csr_vio_shift_ctrl_t shift_ctrl = {
+		.shift_count = BITS_IN_BYTE - 1,
+		.out_mode = NRF_VPR_CSR_VIO_SHIFT_OUTB_TOGGLE,
+		.frame_width = hrt_xfer_params->bus_widths.data,
+		.in_mode = NRF_VPR_CSR_VIO_MODE_IN_SHIFT,
+	};
+	static const nrf_vpr_csr_vio_mode_out_t out_mode = {
+		.mode = NRF_VPR_CSR_VIO_SHIFT_OUTB_TOGGLE,
+		.frame_width = 1,
+	};
+
+	/* Configure clock and pins */
+	/* Set DQ1 as input */
+	WRITE_BIT(hrt_xfer_params->tx_direction_mask, SPI_INPUT_PIN_NUM, VPRCSR_NORDIC_DIR_INPUT);
+	nrf_vpr_csr_vio_dir_set(hrt_xfer_params->tx_direction_mask);
+
+	/* Initial configuration */
+	nrf_vpr_csr_vio_mode_in_set(NRF_VPR_CSR_VIO_MODE_IN_SHIFT);
+	nrf_vpr_csr_vio_mode_out_set(&out_mode);
+	/* Value of 1 is set to SHIFTCNTOUT register to start MSPI clock running, 0 is not possible. 
+	 * Due to hardware error it causes 2*1 clock pulses to be generated.
+	 */
+	nrf_vpr_csr_vio_shift_cnt_out_set(1); 
+
+	/* Counter settings */
+	nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_RELOAD);
+	nrf_vpr_csr_vtim_count_mode_set(1, NRF_VPR_CSR_VTIM_COUNT_RELOAD);
+
+	/* Set top counters value. Trigger data capture every two clock cycles */
+	nrf_vpr_csr_vtim_simple_counter_top_set(0, hrt_xfer_params->counter_value);
+	nrf_vpr_csr_vtim_simple_counter_top_set(1,
+						CNT1_TOP_CALCULATE(hrt_xfer_params->counter_value));
+
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl);
+
+	nrf_vpr_csr_vio_out_buffered_reversed_word_set(0x00);
+
+	nrf_vpr_csr_vtim_combined_counter_set(
+		(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+		(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+	
+//TODO read
+volatile uint32_t d[6];
+	if((hrt_xfer_params->xfer_data[HRT_FE_DATA].word_count == 1) && 
+		(hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks == 2)) {
+			
+		while(nrf_vpr_csr_vio_shift_cnt_in_get() > 0){}
+		nrf_vpr_csr_vtim_simple_counter_top_set(0, 1000);
+		nrf_vpr_csr_vtim_combined_counter_set(
+			(1000 << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+			(2000 << VPRCSR_NORDIC_CNT_CNT1_Pos));
+			hrt_xfer_params->xfer_data[HRT_FE_DATA].data[0] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get()&0x03000000>>24; //TODO magic number
+	} else {
+		uint32_t i=0;
+		for(; i<hrt_xfer_params->xfer_data[HRT_FE_DATA].word_count; i++) {
+
+			switch(hrt_xfer_params->xfer_data[HRT_FE_DATA].word_count-i) {
+				case 0:
+					shift_ctrl.shift_count = SHIFTCNTB_VALUE(hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks);
+					break;
+				case 1:
+					shift_ctrl.shift_count = SHIFTCNTB_VALUE(hrt_xfer_params->xfer_data[HRT_FE_DATA].penultimate_word_clocks);
+					break;
+				default:
+					shift_ctrl.shift_count = SHIFTCNTB_VALUE(BITS_IN_WORD);
+			}
+
+			if(i==0) {
+				shift_ctrl.shift_count -= 2;//TODO magic number
+				nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl);
+				/* Read INBRB to continue clock beyond first 2 pulses. */
+				nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+			} else {
+				nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl);
+				//hrt_xfer_params->xfer_data[HRT_FE_DATA].data[i-1] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+				d[i-1] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+			}
+		}
+
+		while(nrf_vpr_csr_vio_shift_cnt_in_get() > 0){}
+		nrf_vpr_csr_vtim_simple_counter_top_set(0, 1000); //TODO magic number
+		nrf_vpr_csr_vtim_combined_counter_set(
+			(1000 << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+			(2000 << VPRCSR_NORDIC_CNT_CNT1_Pos));
+		
+		//hrt_xfer_params->xfer_data[HRT_FE_DATA].data[i-1] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get(); 
+		d[i-1] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get(); 
+	}
+
+/*
+	shift_ctrl1.shift_count = 29;
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl1);
+	d[0] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+	shift_ctrl1.shift_count = 31;
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl1);
+	d[1] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+
+	while(nrf_vpr_csr_vio_shift_cnt_in_get() > 0){}
+	
+	nrf_vpr_csr_vtim_simple_counter_top_set(0, 1000);
+
+	nrf_vpr_csr_vtim_combined_counter_set(
+		(1000 << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+		(2000 << VPRCSR_NORDIC_CNT_CNT1_Pos));
+
+	d[2] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		
+		
+	*/
+
+
+
+	/* Stop counters */
+	nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+	nrf_vpr_csr_vtim_count_mode_set(1, NRF_VPR_CSR_VTIM_COUNT_STOP);
+
+	/* Final configuration */
+	shift_ctrl.out_mode = NRF_VPR_CSR_VIO_SHIFT_NONE;
+	shift_ctrl.in_mode = NRF_VPR_CSR_VIO_MODE_IN_CONTINUOUS;
+	nrf_vpr_csr_vio_shift_ctrl_buffered_set(&shift_ctrl);
+
+	/* Disable CS */
+	if (!hrt_xfer_params->ce_hold) {
+
+		if (hrt_xfer_params->ce_polarity == MSPI_CE_ACTIVE_LOW) {
+			nrf_vpr_csr_vio_out_or_set(BIT(hrt_xfer_params->ce_vio));
+		} else {
+			nrf_vpr_csr_vio_out_clear_set(BIT(hrt_xfer_params->ce_vio));
+		}
+	}
+
+	/* Set DQ1 back as output. */
+	WRITE_BIT(hrt_xfer_params->tx_direction_mask, SPI_INPUT_PIN_NUM, VPRCSR_NORDIC_DIR_OUTPUT);
+	nrf_vpr_csr_vio_dir_set(hrt_xfer_params->tx_direction_mask);
+
+	volatile bool lock=true;
+	while(lock){}
+}
+
 void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 {
+	hrt_read_new(hrt_xfer_params);
+return;
 	static const nrf_vpr_csr_vio_shift_ctrl_t shift_ctrl = {
 		.out_mode = NRF_VPR_CSR_VIO_SHIFT_NONE,
 		.in_mode = NRF_VPR_CSR_VIO_MODE_IN_CONTINUOUS,
