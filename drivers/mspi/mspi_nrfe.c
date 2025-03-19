@@ -117,7 +117,7 @@ static void ep_recv(const void *data, size_t len, void *priv)
 {
 	nrfe_mspi_flpr_response_msg_t *response = (nrfe_mspi_flpr_response_msg_t *)data;
 
-	switch (response->opcode) {
+	switch ((nrfe_mspi_opcode_t)response->opcode) {
 #if defined(CONFIG_MSPI_NRFE_FAULT_TIMER)
 	case NRFE_MSPI_CONFIG_TIMER_PTR: {
 #if defined(CONFIG_MULTITHREADING)
@@ -162,7 +162,7 @@ static void ep_recv(const void *data, size_t len, void *priv)
 	}
 	case NRFE_MSPI_TXRX: {
 		if (len > 0) {
-			ipc_received = len - sizeof(nrfe_mspi_opcode_t);
+			ipc_received = len - sizeof(uint32_t);
 			ipc_receive_buffer = (uint8_t *)&response->data;
 		}
 #if defined(CONFIG_MULTITHREADING)

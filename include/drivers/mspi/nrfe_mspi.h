@@ -95,7 +95,8 @@ typedef struct {
 } nrfe_mspi_xfer_packet_msg_t;
 
 typedef struct {
-	nrfe_mspi_opcode_t opcode; /* Same as application's request. */
+	/* Later casted to nrfe_mspi_opcode_t, it is set to be uint32_t for alignment purpouse. */
+	uint32_t opcode;
 	uint8_t data;
 } nrfe_mspi_flpr_response_msg_t;
 
