@@ -6,6 +6,7 @@
 #include "hrt.h"
 #include <hal/nrf_vpr_csr_vio.h>
 #include <hal/nrf_vpr_csr_vtim.h>
+#include <zephyr/sys/byteorder.h>
 
 /* Hardware requirement, to get n shifts SHIFTCNTB register has to be set to n-1*/
 #define SHIFTCNTB_VALUE(shift_count) (shift_count - 1)
@@ -16,6 +17,18 @@
 
 #define BYTE_3_SHIFT 24
 #define BYTE_2_SHIFT 16
+
+#define CLK_VIO		    0
+#define D0_VIO		    1
+#define D1_VIO		    2
+#define VIO_SINGLE_BUS_MASK 0x0004
+#define VIO_QUAD_BUS_MASK   0x001E
+
+#define IN_REG_EMPTY 0xffff
+
+/* Time in clock cycles required for RX transfer stop procedure in modes 1-3.
+ * Which is min time between last two clock edges of transfer. */
+#define LAST_WORD_PROCESSING_DELAY 35
 
 /*
  * Macro for calculating TOP value of CNT1. It should be twice as TOP value of CNT0
@@ -66,6 +79,54 @@ NRF_STATIC_INLINE uint32_t get_shift_count(volatile hrt_xfer_t *hrt_xfer_params,
 	default:
 		(*index)++;
 		return SHIFTCNTB_VALUE(BITS_IN_WORD / hrt_xfer_params->bus_widths.data);
+	}
+}
+
+NRF_STATIC_INLINE void rx_end_procedure_mode_3(volatile hrt_xfer_t *hrt_xfer_params)
+{
+	uint32_t last_word;
+	uint16_t in;
+
+	/* Read last word that is missing data from 1 clock pulse. */
+	last_word = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+
+	nrf_vpr_csr_vio_mode_in_set(NRF_VPR_CSR_VIO_MODE_IN_CONTINUOUS);
+
+	if (hrt_xfer_params->counter_value > LAST_WORD_PROCESSING_DELAY) {
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		nrf_vpr_csr_vtim_simple_counter_set(0, hrt_xfer_params->counter_value -
+							       LAST_WORD_PROCESSING_DELAY);
+	}
+	/* Wait for the data to appear in IN register. */
+	while (nrf_vpr_csr_vio_in_get() == IN_REG_EMPTY) {
+	}
+
+	/* Wait for correct edge bit time. */
+	if (hrt_xfer_params->counter_value > LAST_WORD_PROCESSING_DELAY) {
+		nrf_vpr_csr_vtim_simple_wait_set(0, false, 0);
+	}
+
+	in = nrf_vpr_csr_vio_in_get();
+	nrf_vpr_csr_vio_out_or_set(BIT(CLK_VIO));
+
+	/* Insert data from IN register into last word. */
+	switch (hrt_xfer_params->bus_widths.data) {
+	case 1:
+		last_word = (BSWAP_32(last_word) << 1) | (in & VIO_SINGLE_BUS_MASK) >> D1_VIO;
+		last_word = last_word
+			    << (BITS_IN_WORD -
+				(hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks + 1) *
+					hrt_xfer_params->bus_widths.data);
+		hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word = BSWAP_32(last_word);
+		break;
+	case 4:
+		last_word = (BSWAP_32(last_word) << 4) | (in & VIO_QUAD_BUS_MASK) >> D0_VIO;
+		last_word = last_word
+			    << (BITS_IN_WORD -
+				(hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks + 1) *
+					hrt_xfer_params->bus_widths.data);
+		hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word = BSWAP_32(last_word);
+		break;
 	}
 }
 
@@ -243,9 +304,9 @@ void hrt_write(volatile hrt_xfer_t *hrt_xfer_params)
 		nrf_vpr_csr_vio_shift_ctrl_buffered_set(&write_final_shift_ctrl_cfg);
 
 		if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_1) {
-			nrf_vpr_csr_vio_out_clear_set(BIT(hrt_xfer_params->clk_vio));
+			nrf_vpr_csr_vio_out_clear_set(BIT(CLK_VIO));
 		} else if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_3) {
-			nrf_vpr_csr_vio_out_or_set(BIT(hrt_xfer_params->clk_vio));
+			nrf_vpr_csr_vio_out_or_set(BIT(CLK_VIO));
 		}
 	}
 
@@ -281,6 +342,14 @@ void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 	uint32_t last_word;
 	uint16_t prev_out;
 	uint32_t index;
+
+	/* Workaround for hw issue: in modes 1-3 clock does 1 extra edge after stopping.
+	 * To fix it, rx transfer is set up to do 1 clock cycle less and last clock edge is done,
+	 * by writing directly to out register and reading in register.
+	 */
+	if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_3) {
+		hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks -= 1;
+	}
 
 	/* Enable CE */
 	if (hrt_xfer_params->ce_polarity == MSPI_CE_ACTIVE_LOW) {
@@ -439,10 +508,19 @@ void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 		rx_out_mode.mode = NRF_VPR_CSR_VIO_SHIFT_NONE;
 		nrf_vpr_csr_vio_mode_out_set(&rx_out_mode);
 
-		hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word =
-			nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
-			(BITS_IN_WORD - hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks *
-						hrt_xfer_params->bus_widths.data);
+		/* Workaround for hw issue: in modes 1-3 clock does 1 extra edge after stopping.
+		 * To fix it, rx transfer is set up to do 1 clock cycle less and last clock edge is
+		 * done, by writing directly to out register and reading in register.
+		 */
+		if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_3) {
+			rx_end_procedure_mode_3(hrt_xfer_params);
+		} else {
+			hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word =
+				nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
+				(BITS_IN_WORD -
+				 hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks *
+					 hrt_xfer_params->bus_widths.data);
+		}
 	}
 
 	/* Stop counters */
