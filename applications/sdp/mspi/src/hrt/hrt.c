@@ -7,6 +7,7 @@
 #include <hal/nrf_vpr_csr_vio.h>
 #include <hal/nrf_vpr_csr_vtim.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util_macro.h>
 
 /* Hardware requirement, to get n shifts SHIFTCNTB register has to be set to n-1*/
 #define SHIFTCNTB_VALUE(shift_count) (shift_count - 1)
@@ -26,6 +27,12 @@
 
 #define IN_REG_EMPTY 0xffff
 
+/* In RX mid section of transfer is optimized to beter stabilize clock frequency. 
+ * Reception start consists of 1 word, reception end consists of up to 3 words,
+ * so in case of transfers shorter than 5 words, there is no mid section to optimize.
+ */
+#define MAX_WORD_COUNT_FOR_NO_MID_LOOP 4
+
 /* Time in clock cycles required for RX transfer stop procedure in modes 1-3.
  * Which is min time between last two clock edges of transfer. */
 #define LAST_WORD_PROCESSING_DELAY 35
@@ -39,6 +46,12 @@
  * be written to a CNT0 TOP register.
  */
 #define CNT1_TOP_CALCULATE(cnt0_top) (2 * ((cnt0_top) + 1) - 1)
+
+#define __NOP(_,__) __asm__ __volatile__("nop")
+#define WAIT_1_CYCLE_32MHZ(_,__) 	__asm__ __volatile__("nop"); \
+					__asm__ __volatile__("nop"); \
+					__asm__ __volatile__("nop"); \
+					__asm__ __volatile__("nop")
 
 static const nrf_vpr_csr_vio_shift_ctrl_t write_final_shift_ctrl_cfg = {
 	.shift_count = 1,
@@ -66,20 +79,133 @@ NRF_STATIC_INLINE bool is_counter_running(uint8_t counter)
 }
 
 NRF_STATIC_INLINE uint32_t get_shift_count(volatile hrt_xfer_t *hrt_xfer_params,
-					   uint32_t word_count, uint32_t *index)
+					   uint32_t word_count, uint32_t index)
 {
-	switch (word_count - *index) {
+	switch (word_count - index) {
 	case 1: /* Last transfer */
-		(*index)++;
 		return SHIFTCNTB_VALUE(hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks);
 	case 2: /* Last but one transfer */
-		(*index)++;
 		return SHIFTCNTB_VALUE(
 			hrt_xfer_params->xfer_data[HRT_FE_DATA].penultimate_word_clocks);
 	default:
-		(*index)++;
 		return SHIFTCNTB_VALUE(BITS_IN_WORD / hrt_xfer_params->bus_widths.data);
 	}
+}
+//TODO write it in asembly
+NRF_STATIC_INLINE void stop_clock_32MHz(uint32_t *penultimate_word, uint32_t last_word_clocks)
+{
+	volatile uint32_t data = 0;
+	switch(last_word_clocks) {
+	case 1:
+		/* In this case  nrf_vpr_csr_vtim_count_mode_set is too slow to stop clock in time,
+		 * and generates 3 clock edges instead of 2. But this last_word_clocks count is used
+		 * only in MSPI mode 3 which has workaround for that rx_end_procedure_mode_3.
+		 */
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;		
+	case 2:
+		/* Using pointer dereference her to achieve correct timing. */
+		*penultimate_word = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(2, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		return;
+	case 3:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(3, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 4:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(5, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 5:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(8, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 6:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(9, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 7:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(13, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 8:
+		/* Using pointer dereference her to achieve correct timing. */
+		*penultimate_word = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(24, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		return;
+	case 13:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(36, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 14:
+		*penultimate_word = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(46, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		return;
+	case 15:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(40, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 16: 
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(42, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 21:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(58, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 22:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(61, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 23:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(63, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 24:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(66, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 29:
+		volatile {
+			data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+			LISTIFY(83, __NOP, (;));
+			nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		}
+		break;
+	case 30:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(85, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 31:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(89, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	case 32:
+		data = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+		LISTIFY(91, __NOP, (;));
+		nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+		break;
+	}
+
+	*penultimate_word = data;
 }
 
 NRF_STATIC_INLINE void rx_end_procedure_mode_3(volatile hrt_xfer_t *hrt_xfer_params)
@@ -97,17 +223,16 @@ NRF_STATIC_INLINE void rx_end_procedure_mode_3(volatile hrt_xfer_t *hrt_xfer_par
 		nrf_vpr_csr_vtim_simple_counter_set(0, hrt_xfer_params->counter_value -
 							       LAST_WORD_PROCESSING_DELAY);
 	}
-	/* Wait for the data to appear in IN register. */
-	while (nrf_vpr_csr_vio_in_get() == IN_REG_EMPTY) {
-	}
 
-	/* Wait for correct edge bit time. */
+	/* Wait for correct bit edge time. */
 	if (hrt_xfer_params->counter_value > LAST_WORD_PROCESSING_DELAY) {
 		nrf_vpr_csr_vtim_simple_wait_set(0, false, 0);
 	}
 
-	in = nrf_vpr_csr_vio_in_get();
 	nrf_vpr_csr_vio_out_or_set(BIT(CLK_VIO));
+	/* Wait for in mode NRF_VPR_CSR_VIO_MODE_IN_CONTINUOUS to activate. */
+	LISTIFY(8, __NOP, (;));
+	in = nrf_vpr_csr_vio_in_get();
 
 	/* Insert data from IN register into last word. */
 	switch (hrt_xfer_params->bus_widths.data) {
@@ -342,6 +467,18 @@ void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 	uint32_t last_word;
 	uint16_t prev_out;
 	uint32_t index;
+	uint32_t dummy_read;
+
+	/* HW workaround activate data signal delay. 
+	 * There is hardware issue where for frequency 32MHz (and maybe above) IN register starts
+	 * collecting data 1 mspi clock pulse too late. By adding delay using data delay circuit
+	 * (which is intended to be used for different purpouse) data arrives when IN resister starts
+	 * collecting it.
+	 */
+	if(hrt_xfer_params->counter_value == 1) {
+		NRF_GPIOHSPADCTRL_Type* gpio_hs_pad_ctrl = (NRF_GPIOHSPADCTRL_Type*)NRF_P2_S_BASE;
+		gpio_hs_pad_ctrl->CTRL = GPIOHSPADCTRL_CTRL_DATAENABLE_Msk | GPIOHSPADCTRL_CTRL_SCKEN_Msk | 0x01;
+	}
 
 	/* Workaround for hw issue: in modes 1-3 clock does 1 extra edge after stopping.
 	 * To fix it, rx transfer is set up to do 1 clock cycle less and last clock edge is done,
@@ -411,46 +548,64 @@ void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 	nrf_vpr_csr_vio_out_buffered_reversed_word_set(0x00);
 
 	/* Special case when only 2 clocks are required. */
-	if ((word_count == 1) && (hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks == 2)) {
+	if ((word_count == 1) && (hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks <= 2)) {
 
-		/* Start reception. */
-		nrf_vpr_csr_vtim_combined_counter_set(
-			(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
-			(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+		if(hrt_xfer_params->counter_value == 1) {
+			/* Start reception. */
+			/* Duplicate code to keep proper timings. */
+			if (hrt_xfer_params->cpp_mode == MSPI_CPP_MODE_3) {
+				nrf_vpr_csr_vtim_combined_counter_set(
+					(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+					(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+				LISTIFY(6, __NOP, (;));
+				nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+			} else {
+				nrf_vpr_csr_vtim_combined_counter_set(
+					(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+					(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+				LISTIFY(7, __NOP, (;));
+				nrf_vpr_csr_vtim_count_mode_set(0, NRF_VPR_CSR_VTIM_COUNT_STOP);
+			}
+		} else {
 
-		/* Wait for reception to end, transfer has to be stopped "manualy".
-		 * Setting SHIFTCTRLB cannot be used because with RTPERIPHCTRL:STOPCOUNTERS == 1,
-		 * counter stops 1 clock to early.
-		 * nrf_vpr_csr_vio_shift_cnt_in_get function inside while cannot be used because in
-		 * higher frequencies shifting stops before it is called 1-st time.
-		 * So code has to wait for timer 0 to stop.
-		 * WAIT0 cannot be used for this because in higher frequencies function
-		 * nrf_vpr_csr_vtim_simple_wait_set is called when CNT0 has already stopped,
-		 * making code wait indefinitely.
-		 */
-		while (is_counter_running(0)) {
+			/* Start reception. */
+			nrf_vpr_csr_vtim_combined_counter_set(
+				(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
+				(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+
+			/* Wait for reception to end, transfer has to be stopped "manualy".
+			* Setting SHIFTCTRLB cannot be used because with RTPERIPHCTRL:STOPCOUNTERS == 1,
+			* counter stops 1 clock to early.
+			* nrf_vpr_csr_vio_shift_cnt_in_get function inside while cannot be used because in
+			* higher frequencies shifting stops before it is called 1-st time.
+			* So code has to wait for timer 0 to stop.
+			* WAIT0 cannot be used for this because in higher frequencies function
+			* nrf_vpr_csr_vtim_simple_wait_set is called when CNT0 has already stopped,
+			* making code wait indefinitely.
+			*/
+			while (is_counter_running(0)) {
+			}
 		}
 
-		/* Reset VIO outputs. */
-		nrf_vpr_csr_vio_out_buffered_reversed_word_set(prev_out << BYTE_3_SHIFT);
-
+//TODO test 32MHz mode 0 3 , different message lengths 
 		/* Set out mode to none so that reading INB/INBRB register doesn't cause
 		 * clock to continue running.
 		 */
 		rx_out_mode.mode = NRF_VPR_CSR_VIO_SHIFT_NONE;
 		nrf_vpr_csr_vio_mode_out_set(&rx_out_mode);
 
+		/* Reset VIO outputs. */
+		nrf_vpr_csr_vio_out_buffered_reversed_word_set(prev_out << BYTE_3_SHIFT);
 		if (hrt_xfer_params->bus_widths.data == 8) {
-			last_word = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
-			hrt_xfer_params->xfer_data[HRT_FE_DATA].data[0] =
-				(uint8_t)(last_word >> BYTE_2_SHIFT);
-			hrt_xfer_params->xfer_data[HRT_FE_DATA].data[1] =
-				(uint8_t)(last_word >> BYTE_2_SHIFT);
+			hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word =
+				(nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
+						BYTE_2_SHIFT);
 		} else {
-			hrt_xfer_params->xfer_data[HRT_FE_DATA].data[0] =
-				(uint8_t)(nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
-					  BYTE_3_SHIFT);
+			hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word =
+				(nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
+						BYTE_3_SHIFT);
 		}
+
 	} else {
 
 		index = 0;
@@ -461,30 +616,76 @@ void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 		 * generated to receive total of n bits
 		 */
 		rx_shift_ctrl.shift_count =
-			get_shift_count(hrt_xfer_params, word_count, &index) - 2;
+			get_shift_count(hrt_xfer_params, word_count, index) - 2;
+		index++;
 		nrf_vpr_csr_vio_shift_ctrl_buffered_set(&rx_shift_ctrl);
 
-		rx_shift_ctrl.shift_count = get_shift_count(hrt_xfer_params, word_count, &index);
-
-		nrf_vpr_csr_vtim_combined_counter_set(
-			(hrt_xfer_params->counter_value << VPRCSR_NORDIC_CNT_CNT0_Pos) +
-			(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
-		/* Read INBRB to continue clock beyond first 2 pulses.
-		 * For higher frequencies it is important that SHIFTCTRLB is written
-		 * immediately after reading INB/INBRB.
+		rx_shift_ctrl.shift_count = get_shift_count(hrt_xfer_params, word_count, index);
+		index++;
+//volatile bool l=1;
+//while(l){}
+		/* HW workaround.
+		 * In frequency 32MHz (and maybe above) and RTPERIPHCTRL.STOPCOUNTERS=1, tim0 stop
+		 * signal arrives too late, this causes additional clock edge to be generated on
+		 * MSPI.
 		 */
-		nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
-		nrf_vpr_csr_vio_shift_ctrl_buffered_set(&rx_shift_ctrl);
+		if((hrt_xfer_params->counter_value == 1) && (word_count == 1)) {
 
-		for (uint32_t i = 0; i < word_count - 1; i++) {
-			rx_shift_ctrl.shift_count =
-				get_shift_count(hrt_xfer_params, word_count, &index);
+			/* Duplicated code to keep proper timing. */
+			nrf_vpr_csr_vtim_combined_counter_set(
+				(hrt_xfer_params->counter_value<< VPRCSR_NORDIC_CNT_CNT0_Pos) +
+				(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
 
-			/* For higher frequencies it is important that SHIFTCTRLB is written
+			/* In case when word_count == 1, 
+			 * first nrf_vpr_csr_vio_in_buffered_reversed_byte_get happens after 2 mspi
+			 * clocks.
+			 */
+			stop_clock_32MHz(&dummy_read,hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks-2);
+		} else {
+			/* Duplicated code to keep proper timing. */
+			nrf_vpr_csr_vtim_combined_counter_set(
+				(hrt_xfer_params->counter_value<< VPRCSR_NORDIC_CNT_CNT0_Pos) +
+				(CNT1_INIT_VALUE << VPRCSR_NORDIC_CNT_CNT1_Pos));
+
+			/* Read INBRB to continue clock beyond first 2 pulses.
+			 * For higher frequencies it is important that SHIFTCTRLB is written
 			 * immediately after reading INB/INBRB.
 			 */
-			data[i] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+			nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
 			nrf_vpr_csr_vio_shift_ctrl_buffered_set(&rx_shift_ctrl);
+		}
+
+		/* Read middle section of transfer data i n short loop to make clock more stable.
+		 * In this section all words have the same length.
+		 */
+		if(word_count > MAX_WORD_COUNT_FOR_NO_MID_LOOP) {
+			for(uint32_t i = 0; i<word_count - MAX_WORD_COUNT_FOR_NO_MID_LOOP; i++) {
+				data[i] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+			}
+			index += word_count - MAX_WORD_COUNT_FOR_NO_MID_LOOP;
+		}
+
+		/* Read end section of data, in this section word length may change. */
+		for(uint32_t i=index-2; i<word_count - 1; i++) {
+			rx_shift_ctrl.shift_count =
+				get_shift_count(hrt_xfer_params, word_count, index);
+			index++;
+			
+			/* HW workaround.
+			 * In frequency 32MHz (and maybe above) and RTPERIPHCTRL.STOPCOUNTERS=1,
+			 * tim0 stop signal arrives too late, this causes additional clock edge to
+			 * be generated on MSPI bus.
+			 */
+			if((hrt_xfer_params->counter_value == 1) && (i == word_count - 2)) {
+				stop_clock_32MHz(&data[i],hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks);
+			} else {
+
+				/* For higher frequencies it is important that SHIFTCTRLB is written
+				* immediately after reading INB/INBRB.
+				*/
+				data[i] = nrf_vpr_csr_vio_in_buffered_reversed_byte_get();
+				nrf_vpr_csr_vio_shift_ctrl_buffered_set(&rx_shift_ctrl);
+			}
 		}
 
 		/* Wait for reception to end, transfer has to be stopped "manualy".
@@ -516,7 +717,7 @@ void hrt_read(volatile hrt_xfer_t *hrt_xfer_params)
 			rx_end_procedure_mode_3(hrt_xfer_params);
 		} else {
 			hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word =
-				nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
+			nrf_vpr_csr_vio_in_buffered_reversed_byte_get() >>
 				(BITS_IN_WORD -
 				 hrt_xfer_params->xfer_data[HRT_FE_DATA].last_word_clocks *
 					 hrt_xfer_params->bus_widths.data);
