@@ -1,0 +1,4 @@
+sample:
+  description: SAADC + TIMER sample
+    application
+  name: saadct
