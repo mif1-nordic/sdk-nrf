@@ -1,0 +1,15 @@
+# Copyright (c) 2018, Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+description: Nordic Semiconductor nRF family SAADCT node
+
+compatible: "nordic,nrf-saadct"
+
+include: nordic,nrf-saadc.yaml
+
+properties:
+  timer-instance:
+    required: true
+    type: phandle
+    description: |
+      Timer instance.
